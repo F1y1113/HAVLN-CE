@@ -219,6 +219,27 @@ Human Rendering is defined in the class **HAVLNCE** of [HASimulator/enviorments.
 
 Human Rendering uses child threads for timing and the main thread for adding / removing human models and recalculating the required navmesh in real time.
 
+## 🧍 Text-to-Avatar Action Assets
+
+This repository also includes an experimental `havln3` asset pipeline for turning
+a one-sentence human action description into HA-VLN/HAPS-compatible animated GLB
+frames:
+
+- selects a matching ViCo/Mixamo avatar while preserving the avatar's original
+  mesh, UVs, skin weights, and textures;
+- loads existing Kimodo `.npz` or GEM `smpl_params.pt` motion outputs;
+- retargets SMPL-22/GEM/Kimodo motion onto the avatar rig;
+- uses calibrated two-bone leg IK when Kimodo `posed_joints` are available, so
+  hip-knee-ankle bending follows the target avatar's knee pole instead of
+  folding backward;
+- exports Habitat-safe materials and a lightweight mesh shell so side/back
+  cameras see body volume instead of paper-thin clothing surfaces;
+- exports `Data/HAPS2_0/<asset>/frameXXX.glb`,
+  `frameXXX.object_config.json`, `skeleton.json`, and `persona.json`.
+
+See [docs/avatar_action_pipeline.md](docs/avatar_action_pipeline.md) for commands,
+retargeting rules, and tuning options.
+
 In the first use, the navmesh will be automatically calculated and saved to support operations such as collision calculation, and the subsequent use will directly load the previously generated navmesh. To enable human rendering, modify the following settings in [HAVLN-CE task config](HASimulator/config/HAVLNCE_task.yaml):
 
 ```
@@ -443,4 +464,3 @@ If you find this repository or our paper useful, please consider **starring** th
 This project is licensed under the MIT License. For more details, see the [LICENSE](LICENSE) file.
 
 ---
-
