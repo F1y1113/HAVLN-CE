@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from havln3.avatar_assets import select_avatar
-from havln3.motion import generate_kimodo_motion, load_motion_file
+from havln3.motion import generate_kimodo_motion_candidates, load_motion_file
+from havln3.motion_quality import MotionQualityOptions, rank_motion_files, write_motion_quality_report
 from havln3.retarget import RetargetOptions, retarget_motion_to_avatar
 
 
@@ -31,6 +32,9 @@ class AvatarActionRequest:
     identity: str | None = None
     generator: str = "existing"
     kimodo_model: str = "Kimodo-SMPLX-RP-v1"
+    kimodo_num_samples: int = 1
+    motion_quality_select: bool = True
+    motion_quality_min_score: float = 62.0
     duration: float = 5.0
     seed: int | None = None
     frames: int = 120
@@ -79,7 +83,7 @@ class AvatarActionPipeline:
         avatar = avatar_match.asset
         asset_name = request.asset_name or _slugify(f"{avatar.display_name}_{request.prompt}")
         asset_dir = request.output_root / "Data" / "HAPS2_0" / asset_name
-        motion_path, amass_path = self._resolve_motion(request, asset_name)
+        motion_path, amass_path, motion_selection = self._resolve_motion(request, asset_name)
         motion = load_motion_file(
             motion_path,
             amass_path=amass_path,
@@ -129,6 +133,7 @@ class AvatarActionPipeline:
                 }
                 for match in top_matches
             ],
+            "motion": motion_selection,
         }
         report = retarget_motion_to_avatar(
             avatar_glb=avatar.path,
@@ -153,20 +158,68 @@ class AvatarActionPipeline:
             skeleton_path=asset_dir / "skeleton.json",
         )
 
-    def _resolve_motion(self, request: AvatarActionRequest, asset_name: str) -> tuple[Path, Path | None]:
+    def _resolve_motion(
+        self,
+        request: AvatarActionRequest,
+        asset_name: str,
+    ) -> tuple[Path, Path | None, dict[str, object]]:
         if request.motion_npz:
-            return request.motion_npz, request.amass_npz
+            return request.motion_npz, request.amass_npz, {
+                "mode": "provided",
+                "selected": str(request.motion_npz),
+                "amass": str(request.amass_npz) if request.amass_npz else None,
+            }
         if request.gem_smpl_params:
-            return request.gem_smpl_params, None
+            return request.gem_smpl_params, None, {
+                "mode": "provided_gem",
+                "selected": str(request.gem_smpl_params),
+                "amass": None,
+            }
         if request.generator == "kimodo":
             output_stem = request.output_root / "motion_generation" / asset_name / asset_name
-            return generate_kimodo_motion(
+            generated = generate_kimodo_motion_candidates(
                 request.prompt,
                 output_stem,
                 model=request.kimodo_model,
                 duration=request.duration,
                 seed=request.seed,
+                num_samples=request.kimodo_num_samples,
             )
+            if not generated:
+                raise RuntimeError(f"Kimodo did not produce .npz motion files under {output_stem.parent}")
+            if len(generated) == 1 or not request.motion_quality_select:
+                selected, amass = generated[0]
+                return selected, amass, {
+                    "mode": "kimodo",
+                    "quality_select": False,
+                    "selected": str(selected),
+                    "amass": str(amass) if amass else None,
+                    "candidates": [str(path) for path, _ in generated],
+                }
+
+            amass_by_motion = {motion_path: amass_path for motion_path, amass_path in generated}
+            quality_options = MotionQualityOptions(min_score=request.motion_quality_min_score)
+            quality_reports = rank_motion_files(
+                [motion_path for motion_path, _ in generated],
+                prompt=request.prompt,
+                options=quality_options,
+                gem_param_group=request.gem_param_group,
+            )
+            quality_report_path = output_stem.parent / "motion_quality_report.json"
+            write_motion_quality_report(quality_report_path, quality_reports)
+            best = quality_reports[0]
+            best_path = Path(best.path)
+            return best_path, amass_by_motion.get(best_path), {
+                "mode": "kimodo",
+                "quality_select": True,
+                "selected": str(best_path),
+                "amass": str(amass_by_motion.get(best_path)) if amass_by_motion.get(best_path) else None,
+                "quality_report": str(quality_report_path),
+                "best_score": best.score,
+                "best_passed": best.passed,
+                "best_reasons": best.reasons,
+                "candidate_count": len(quality_reports),
+            }
         raise ValueError(
             "No motion source was provided. Pass --motion-npz/--gem-smpl-params, "
             "or use --generator kimodo in an environment where kimodo_gen is installed."

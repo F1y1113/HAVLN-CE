@@ -30,6 +30,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gem-param-group", default="body_params_global")
     parser.add_argument("--generator", choices=["existing", "kimodo"], default="existing")
     parser.add_argument("--kimodo-model", default="Kimodo-SMPLX-RP-v1")
+    parser.add_argument("--kimodo-num-samples", type=int, default=1)
+    parser.add_argument(
+        "--no-motion-quality-select",
+        action="store_true",
+        help="Disable automatic quality ranking when Kimodo generates multiple samples.",
+    )
+    parser.add_argument("--motion-quality-min-score", type=float, default=62.0)
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--asset-name")
@@ -99,6 +106,9 @@ def main() -> None:
             gem_param_group=args.gem_param_group,
             generator=args.generator,
             kimodo_model=args.kimodo_model,
+            kimodo_num_samples=args.kimodo_num_samples,
+            motion_quality_select=not args.no_motion_quality_select,
+            motion_quality_min_score=args.motion_quality_min_score,
             duration=args.duration,
             seed=args.seed,
             asset_name=args.asset_name,

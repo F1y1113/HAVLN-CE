@@ -184,7 +184,38 @@ def generate_kimodo_motion(
     seed: int | None = None,
     cfg_type: str | None = None,
     extra_args: list[str] | None = None,
+    num_samples: int = 1,
 ) -> tuple[Path, Path | None]:
+    candidates = generate_kimodo_motion_candidates(
+        prompt,
+        output_stem,
+        model=model,
+        duration=duration,
+        kimodo_bin=kimodo_bin,
+        seed=seed,
+        cfg_type=cfg_type,
+        extra_args=extra_args,
+        num_samples=num_samples,
+    )
+    if candidates:
+        return candidates[0]
+    motion_path = output_stem.with_suffix(".npz")
+    amass_path = output_stem.with_name(output_stem.name + "_amass.npz")
+    return motion_path, amass_path if amass_path.exists() else None
+
+
+def generate_kimodo_motion_candidates(
+    prompt: str,
+    output_stem: Path,
+    *,
+    model: str = "Kimodo-SMPLX-RP-v1",
+    duration: float = 5.0,
+    kimodo_bin: str = "kimodo_gen",
+    seed: int | None = None,
+    cfg_type: str | None = None,
+    extra_args: list[str] | None = None,
+    num_samples: int = 1,
+) -> list[tuple[Path, Path | None]]:
     executable = shutil.which(kimodo_bin)
     if not executable:
         raise RuntimeError(
@@ -201,7 +232,7 @@ def generate_kimodo_motion(
         "--output",
         str(output_stem),
         "--num_samples",
-        "1",
+        str(max(1, num_samples)),
     ]
     if seed is not None:
         command.extend(["--seed", str(seed)])
@@ -211,10 +242,26 @@ def generate_kimodo_motion(
         command.extend(extra_args)
     subprocess.run(command, check=True)
 
-    motion_path = output_stem.with_suffix(".npz")
-    amass_path = output_stem.with_name(output_stem.name + "_amass.npz")
-    if not motion_path.exists():
-        candidates = sorted(output_stem.parent.glob(f"{output_stem.name}*.npz"))
-        if candidates:
-            motion_path = candidates[0]
-    return motion_path, amass_path if amass_path.exists() else None
+    return _generated_motion_candidates(output_stem)
+
+
+def _generated_motion_candidates(output_stem: Path) -> list[tuple[Path, Path | None]]:
+    candidates = sorted(output_stem.parent.glob(f"{output_stem.name}*.npz"))
+    direct = output_stem.with_suffix(".npz")
+    if direct.exists() and direct not in candidates:
+        candidates.insert(0, direct)
+    if not candidates:
+        return []
+
+    result: list[tuple[Path, Path | None]] = []
+    for motion_path in candidates:
+        suffix = motion_path.stem.removeprefix(output_stem.name).lstrip("_")
+        companion_names = [
+            motion_path.with_name(motion_path.stem + "_amass.npz"),
+            output_stem.with_name(output_stem.name + "_amass.npz"),
+        ]
+        if suffix:
+            companion_names.append(output_stem.with_name(f"amass_{suffix}.npz"))
+        amass_path = next((path for path in companion_names if path.exists()), None)
+        result.append((motion_path, amass_path))
+    return result
