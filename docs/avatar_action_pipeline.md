@@ -88,13 +88,14 @@ For stationary acrobatics such as standing backflips, add:
 flip's pitch/roll. `--foot-contact-lock` detects low support/landing feet and
 keeps the whole body anchored to the contact point with a short blend at the
 segment edges. It also stabilizes contact-foot orientation by default, aligning
-the toe direction to the initial stance direction, compensating for root yaw
-stabilization, and aligning the foot-up axis to the floor normal so landing
-frames do not inherit rolled or twisted ankles from the generated motion. During
-contact it also neutralizes toe-base curl so the shoe mesh does not flip even
-when the source motion twists the toe joint. Use `--no-foot-orientation-lock`
-only for debugging. Tune `--foot-contact-height` and `--foot-lock-blend-frames`
-if a motion source marks contact too early or too late.
+the toe direction to the target rig's body-facing direction, compensating for
+root yaw stabilization, and aligning the foot-up axis to the floor normal so
+landing frames do not inherit rolled or twisted ankles from the generated
+motion. During contact it also neutralizes toe-base curl so the shoe mesh does
+not flip even when the source motion twists the toe joint. Use
+`--no-foot-orientation-lock` only for debugging. Tune `--foot-contact-height`
+and `--foot-lock-blend-frames` if a motion source marks contact too early or too
+late.
 
 ## Habitat Material And Thickness
 

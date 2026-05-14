@@ -549,6 +549,28 @@ def _root_yaw_from_joints(joints: np.ndarray, joint_by_name: dict[str, int]) -> 
     return float(np.arctan2(side_unit[2], side_unit[0]))
 
 
+def _body_forward_from_globals(
+    globals_: list[np.ndarray],
+    gltf: GLTF2,
+    skin: Any,
+    joint_by_name: dict[str, int],
+) -> np.ndarray | None:
+    for left_name, right_name in (("LeftShoulder", "RightShoulder"), ("LeftUpLeg", "RightUpLeg")):
+        left_index = joint_by_name.get(left_name)
+        right_index = joint_by_name.get(right_name)
+        if left_index is None or right_index is None:
+            continue
+        left = globals_[skin.joints[left_index]][:3, 3]
+        right = globals_[skin.joints[right_index]][:3, 3]
+        side = _projected_unit(right - left, GLTF_UP)
+        if side is None:
+            continue
+        forward = _safe_unit(np.cross(GLTF_UP, side))
+        if forward is not None:
+            return forward
+    return None
+
+
 def _frame_pivot(frame: FrameGeometry, joint_by_name: dict[str, int]) -> np.ndarray:
     if frame.joints is not None:
         hips = _joint_point(frame.joints, joint_by_name, "Hips")
@@ -835,15 +857,7 @@ def _apply_contact_foot_orientation_lock(
     }
     calibration_by_side = {calibration.side: calibration for calibration in calibrations}
     reference_globals = node_global_matrices(gltf, local_quats_by_frame[0])
-    reference_toe_direction: dict[str, np.ndarray] = {}
-    for calibration in calibrations:
-        if calibration.toe is None:
-            continue
-        ankle_pos = reference_globals[skin.joints[calibration.ankle]][:3, 3]
-        toe_pos = reference_globals[skin.joints[calibration.toe]][:3, 3]
-        toe_direction = _projected_unit(toe_pos - ankle_pos, GLTF_UP)
-        if toe_direction is not None:
-            reference_toe_direction[calibration.side] = toe_direction
+    reference_forward = _body_forward_from_globals(reference_globals, gltf, skin, joint_by_name)
 
     reference_yaw: float | None = None
     if options.stabilize_root_yaw:
@@ -892,10 +906,7 @@ def _apply_contact_foot_orientation_lock(
                     continue
 
                 parent_rotation = _rotation_from_matrix(globals_[skin.joints[calibration.knee]])
-                desired_toe_direction = reference_toe_direction.get(
-                    side,
-                    calibration.rest_contact_toe_global,
-                )
+                desired_toe_direction = reference_forward if reference_forward is not None else calibration.rest_contact_toe_global
                 if desired_toe_direction is None:
                     continue
                 if reference_yaw is not None and rough_frames[frame_index].joints is not None:
@@ -932,7 +943,7 @@ def _apply_contact_foot_orientation_lock(
         "locked_frames": len(locked_frames),
         "segments": applied_segments,
         "strategy": (
-            "align contact foot toe vector to the initial stance direction, "
+            "align contact foot toe vector to the target rig body-facing direction, "
             "align foot up to ground normal, and neutralize toe-base curl"
         ),
         "blend_frames": options.foot_lock_blend_frames,
