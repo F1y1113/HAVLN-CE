@@ -44,6 +44,7 @@ class AvatarActionRequest:
     preserve_root_motion: bool = False
     stabilize_root_yaw: bool = False
     foot_contact_lock: bool = False
+    foot_orientation_lock: bool = True
     foot_contact_height: float = 0.12
     foot_lock_blend_frames: int = 4
     calibrated_leg_ik: bool = True
@@ -93,6 +94,7 @@ class AvatarActionPipeline:
             preserve_root_motion=request.preserve_root_motion,
             stabilize_root_yaw=request.stabilize_root_yaw,
             foot_contact_lock=request.foot_contact_lock,
+            foot_orientation_lock=request.foot_orientation_lock,
             foot_contact_height=request.foot_contact_height,
             foot_lock_blend_frames=request.foot_lock_blend_frames,
             calibrated_leg_ik=request.calibrated_leg_ik,

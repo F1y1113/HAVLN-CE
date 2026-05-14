@@ -58,6 +58,8 @@ SMPL_LEG_JOINTS = {
     "Right": {"hip": 2, "knee": 5, "ankle": 8, "toe": 11},
 }
 
+GLTF_UP = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
 
 @dataclass(frozen=True)
 class RetargetOptions:
@@ -74,6 +76,7 @@ class RetargetOptions:
     snap_to_ground: bool = True
     stabilize_root_yaw: bool = False
     foot_contact_lock: bool = False
+    foot_orientation_lock: bool = True
     foot_contact_height: float = 0.12
     foot_lock_blend_frames: int = 4
     alpha_cutoff: float = 0.55
@@ -103,12 +106,22 @@ class LegCalibration:
     rest_pole_knee_local: np.ndarray
     rest_pole_foot_local: np.ndarray | None
     rest_toe_local: np.ndarray | None
+    rest_foot_up_local: np.ndarray | None
+    rest_contact_toe_global: np.ndarray | None
 
 
 @dataclass
 class FrameGeometry:
     vertices_by_primitive: list[np.ndarray]
     joints: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class FootContactAnalysis:
+    centers: np.ndarray
+    lows: np.ndarray
+    contact_mask: np.ndarray
+    segments: list[tuple[int, int]]
 
 
 def _scaled_quat_from_matrix(matrix: np.ndarray, scale: float) -> np.ndarray:
@@ -263,6 +276,8 @@ def _leg_calibrations(
 
         rest_upper = knee_pos - hip_pos
         rest_lower = ankle_pos - knee_pos
+        rest_toe = rest_positions[toe] - ankle_pos if toe is not None else None
+        rest_contact_toe = _projected_unit(rest_toe, GLTF_UP) if rest_toe is not None else None
         calibrations.append(
             LegCalibration(
                 side=side,
@@ -279,11 +294,9 @@ def _leg_calibrations(
                 rest_pole_hip_local=rest_rotations[hip].inv().apply(pole),
                 rest_pole_knee_local=rest_rotations[knee].inv().apply(pole),
                 rest_pole_foot_local=rest_rotations[ankle].inv().apply(pole) if toe is not None else None,
-                rest_toe_local=(
-                    rest_rotations[ankle].inv().apply(rest_positions[toe] - ankle_pos)
-                    if toe is not None
-                    else None
-                ),
+                rest_toe_local=rest_rotations[ankle].inv().apply(rest_toe) if rest_toe is not None else None,
+                rest_foot_up_local=rest_rotations[ankle].inv().apply(GLTF_UP) if toe is not None else None,
+                rest_contact_toe_global=rest_contact_toe,
             )
         )
     return calibrations
@@ -624,6 +637,16 @@ def _edge_blend_weight(index: int, start: int, end: int, frame_count: int, blend
     return float(np.clip(weight, 0.0, 1.0))
 
 
+def _blend_rotation(source: Rotation, target: Rotation, weight: float) -> Rotation:
+    weight = float(np.clip(weight, 0.0, 1.0))
+    if weight <= 0.0:
+        return source
+    if weight >= 1.0:
+        return target
+    delta = target * source.inv()
+    return Rotation.from_rotvec(delta.as_rotvec() * weight) * source
+
+
 def _source_foot_contact_mask(foot_contacts: np.ndarray | None, frame_count: int) -> np.ndarray | None:
     if foot_contacts is None or len(foot_contacts) != frame_count:
         return None
@@ -647,21 +670,26 @@ def _select_lock_segments(support_mask: np.ndarray) -> list[tuple[int, int]]:
     for start, end in segments:
         if start <= start_window_end or end >= landing_window_start:
             selected.append((start, end))
-    if not any(end >= landing_window_start for _, end in selected):
+    landing_indices = [index for index, (start, end) in enumerate(selected) if end >= landing_window_start]
+    if landing_indices:
+        index = landing_indices[-1]
+        start, end = selected[index]
+        if start >= landing_window_start and end < frame_count - 1:
+            selected[index] = (start, frame_count - 1)
+    else:
         lock_frames = max(3, min(8, frame_count // 5))
         selected.append((frame_count - lock_frames, frame_count - 1))
     return selected
 
 
-def _apply_foot_contact_lock(
+def _foot_contact_analysis(
     frames: list[FrameGeometry],
     joint_by_name: dict[str, int],
     *,
     ground_y: float,
     contact_height: float,
-    blend_frames: int,
     source_foot_contacts: np.ndarray | None = None,
-) -> dict[str, Any]:
+) -> FootContactAnalysis | None:
     frame_count = len(frames)
     centers = np.full((frame_count, 2, 3), np.nan, dtype=np.float64)
     lows = np.full((frame_count, 2), np.nan, dtype=np.float64)
@@ -675,7 +703,7 @@ def _apply_foot_contact_lock(
                 lows[frame_index, side_index] = low
 
     if np.isnan(lows).all():
-        return {"enabled": True, "locked_frames": 0, "reason": "missing foot joints"}
+        return None
 
     contact_mask = lows <= (ground_y + contact_height)
     source_mask = _source_foot_contact_mask(source_foot_contacts, frame_count)
@@ -683,7 +711,38 @@ def _apply_foot_contact_lock(
         contact_mask = contact_mask | (source_mask & (lows <= ground_y + contact_height * 2.0))
     contact_mask = np.nan_to_num(contact_mask, nan=False).astype(bool)
     support_mask = contact_mask.any(axis=1)
-    segments = _select_lock_segments(support_mask)
+    return FootContactAnalysis(
+        centers=centers,
+        lows=lows,
+        contact_mask=contact_mask,
+        segments=_select_lock_segments(support_mask),
+    )
+
+
+def _apply_foot_contact_lock(
+    frames: list[FrameGeometry],
+    joint_by_name: dict[str, int],
+    *,
+    ground_y: float,
+    contact_height: float,
+    blend_frames: int,
+    source_foot_contacts: np.ndarray | None = None,
+) -> dict[str, Any]:
+    frame_count = len(frames)
+    analysis = _foot_contact_analysis(
+        frames,
+        joint_by_name,
+        ground_y=ground_y,
+        contact_height=contact_height,
+        source_foot_contacts=source_foot_contacts,
+    )
+    if analysis is None:
+        return {"enabled": True, "locked_frames": 0, "reason": "missing foot joints"}
+
+    centers = analysis.centers
+    lows = analysis.lows
+    contact_mask = analysis.contact_mask
+    segments = analysis.segments
 
     locked_frames: set[int] = set()
     applied_segments: list[dict[str, Any]] = []
@@ -747,6 +806,139 @@ def _apply_foot_contact_lock(
     }
 
 
+def _apply_contact_foot_orientation_lock(
+    *,
+    local_quats_by_frame: list[np.ndarray],
+    rough_frames: list[FrameGeometry],
+    gltf: GLTF2,
+    joint_by_name: dict[str, int],
+    calibrations: list[LegCalibration],
+    clip: MotionClip,
+    options: RetargetOptions,
+) -> dict[str, Any]:
+    if not calibrations:
+        return {"enabled": True, "locked_frames": 0, "reason": "missing leg calibration"}
+
+    analysis = _foot_contact_analysis(
+        rough_frames,
+        joint_by_name,
+        ground_y=options.ground_y,
+        contact_height=options.foot_contact_height,
+        source_foot_contacts=clip.foot_contacts,
+    )
+    if analysis is None:
+        return {"enabled": True, "locked_frames": 0, "reason": "missing foot joints"}
+
+    skin = gltf.skins[0]
+    local_rest_rot = {
+        skin_index: _local_rest_rotation(gltf, node_index) for skin_index, node_index in enumerate(skin.joints)
+    }
+    calibration_by_side = {calibration.side: calibration for calibration in calibrations}
+    reference_globals = node_global_matrices(gltf, local_quats_by_frame[0])
+    reference_toe_direction: dict[str, np.ndarray] = {}
+    for calibration in calibrations:
+        if calibration.toe is None:
+            continue
+        ankle_pos = reference_globals[skin.joints[calibration.ankle]][:3, 3]
+        toe_pos = reference_globals[skin.joints[calibration.toe]][:3, 3]
+        toe_direction = _projected_unit(toe_pos - ankle_pos, GLTF_UP)
+        if toe_direction is not None:
+            reference_toe_direction[calibration.side] = toe_direction
+
+    reference_yaw: float | None = None
+    if options.stabilize_root_yaw:
+        for frame in rough_frames:
+            if frame.joints is None:
+                continue
+            yaw = _root_yaw_from_joints(frame.joints.copy(), joint_by_name)
+            if yaw is not None:
+                reference_yaw = yaw
+                break
+
+    frame_count = len(local_quats_by_frame)
+    locked_frames: set[int] = set()
+    applied_segments: list[dict[str, Any]] = []
+
+    for start, end in analysis.segments:
+        if start > end:
+            continue
+        segment_mask = analysis.contact_mask[start : end + 1]
+        side_indices = [index for index in range(2) if segment_mask[:, index].any()]
+        if not side_indices:
+            continue
+
+        applied_segments.append(
+            {
+                "start": int(start),
+                "end": int(end),
+                "sides": ["Left" if index == 0 else "Right" for index in side_indices],
+            }
+        )
+        for frame_index in range(start, end + 1):
+            weight = _edge_blend_weight(frame_index, start, end, frame_count, options.foot_lock_blend_frames)
+            if weight <= 0.0:
+                continue
+            globals_ = node_global_matrices(gltf, local_quats_by_frame[frame_index])
+            for side_index in side_indices:
+                if not analysis.contact_mask[frame_index, side_index]:
+                    continue
+                side = "Left" if side_index == 0 else "Right"
+                calibration = calibration_by_side.get(side)
+                if (
+                    calibration is None
+                    or calibration.rest_toe_local is None
+                    or calibration.rest_foot_up_local is None
+                ):
+                    continue
+
+                parent_rotation = _rotation_from_matrix(globals_[skin.joints[calibration.knee]])
+                desired_toe_direction = reference_toe_direction.get(
+                    side,
+                    calibration.rest_contact_toe_global,
+                )
+                if desired_toe_direction is None:
+                    continue
+                if reference_yaw is not None and rough_frames[frame_index].joints is not None:
+                    yaw = _root_yaw_from_joints(rough_frames[frame_index].joints.copy(), joint_by_name)
+                    if yaw is not None:
+                        yaw_delta = _wrap_angle(yaw - reference_yaw)
+                        desired_toe_direction = Rotation.from_rotvec(GLTF_UP * yaw_delta).apply(
+                            desired_toe_direction
+                        )
+                desired_foot_rotation = _basis_rotation(
+                    calibration.rest_toe_local,
+                    calibration.rest_foot_up_local,
+                    desired_toe_direction,
+                    GLTF_UP,
+                )
+                target_delta = local_rest_rot[calibration.ankle].inv() * parent_rotation.inv() * desired_foot_rotation
+                current_delta = Rotation.from_quat(local_quats_by_frame[frame_index][calibration.ankle])
+                local_quats_by_frame[frame_index][calibration.ankle] = _blend_rotation(
+                    current_delta,
+                    target_delta,
+                    weight,
+                ).as_quat()
+                if calibration.toe is not None:
+                    current_toe_delta = Rotation.from_quat(local_quats_by_frame[frame_index][calibration.toe])
+                    local_quats_by_frame[frame_index][calibration.toe] = _blend_rotation(
+                        current_toe_delta,
+                        Rotation.identity(),
+                        weight,
+                    ).as_quat()
+                locked_frames.add(frame_index)
+
+    return {
+        "enabled": True,
+        "locked_frames": len(locked_frames),
+        "segments": applied_segments,
+        "strategy": (
+            "align contact foot toe vector to the initial stance direction, "
+            "align foot up to ground normal, and neutralize toe-base curl"
+        ),
+        "blend_frames": options.foot_lock_blend_frames,
+    }
+
+
 def _postprocess_frames(
     frames: list[FrameGeometry],
     joint_by_name: dict[str, int],
@@ -756,6 +948,7 @@ def _postprocess_frames(
     report: dict[str, Any] = {
         "root_yaw_stabilization": {"enabled": False},
         "foot_contact_lock": {"enabled": False},
+        "foot_orientation_lock": {"enabled": False},
     }
     if options.stabilize_root_yaw:
         report["root_yaw_stabilization"] = _apply_root_yaw_stabilization(frames, joint_by_name)
@@ -862,6 +1055,30 @@ def _export_frame(
     scene.export(glb_path, include_normals=True)
 
 
+def _build_frame_geometries(
+    *,
+    gltf: GLTF2,
+    skin: Any,
+    local_quats_by_frame: list[np.ndarray],
+    normalizer: VertexNormalizer,
+    clip: MotionClip,
+    options: RetargetOptions,
+) -> list[FrameGeometry]:
+    frames: list[FrameGeometry] = []
+    for frame_index, local_quats in enumerate(local_quats_by_frame):
+        deformed = deform_skinned_primitives(gltf, local_quats)
+        globals_ = node_global_matrices(gltf, local_quats)
+        joint_points = np.stack([globals_[joint][:3, 3] for joint in skin.joints])
+        transformed, transformed_joints = normalizer.transform(
+            deformed,
+            joint_points,
+            root_offset=_root_offset(clip, frame_index, options=options),
+            snap_to_ground=options.snap_to_ground,
+        )
+        frames.append(FrameGeometry(vertices_by_primitive=transformed, joints=transformed_joints))
+    return frames
+
+
 def retarget_motion_to_avatar(
     *,
     avatar_glb: Path,
@@ -895,7 +1112,7 @@ def retarget_motion_to_avatar(
 
     material_changes: dict[str, Any] = {}
     bounds: list[dict[str, list[float]]] = []
-    frame_geometries: list[FrameGeometry] = []
+    local_quats_by_frame: list[np.ndarray] = []
     joint_names = [joint_base_name(gltf.nodes[joint].name) for joint in skin.joints]
 
     for frame_index in range(options.frames):
@@ -912,18 +1129,38 @@ def retarget_motion_to_avatar(
                     gltf=gltf,
                     calibrations=leg_calibrations,
                 )
-        deformed = deform_skinned_primitives(gltf, local_quats)
-        globals_ = node_global_matrices(gltf, local_quats)
-        joint_points = np.stack([globals_[joint][:3, 3] for joint in skin.joints])
-        transformed, transformed_joints = normalizer.transform(
-            deformed,
-            joint_points,
-            root_offset=_root_offset(clip, frame_index, options=options),
-            snap_to_ground=options.snap_to_ground,
-        )
-        frame_geometries.append(FrameGeometry(vertices_by_primitive=transformed, joints=transformed_joints))
+        local_quats_by_frame.append(local_quats)
 
+    pre_postprocess: dict[str, Any] = {"foot_orientation_lock": {"enabled": False}}
+    if options.foot_contact_lock and options.foot_orientation_lock:
+        rough_frames = _build_frame_geometries(
+            gltf=gltf,
+            skin=skin,
+            local_quats_by_frame=local_quats_by_frame,
+            normalizer=normalizer,
+            clip=clip,
+            options=options,
+        )
+        pre_postprocess["foot_orientation_lock"] = _apply_contact_foot_orientation_lock(
+            local_quats_by_frame=local_quats_by_frame,
+            rough_frames=rough_frames,
+            gltf=gltf,
+            joint_by_name=joint_by_name,
+            calibrations=leg_calibrations,
+            clip=clip,
+            options=options,
+        )
+
+    frame_geometries = _build_frame_geometries(
+        gltf=gltf,
+        skin=skin,
+        local_quats_by_frame=local_quats_by_frame,
+        normalizer=normalizer,
+        clip=clip,
+        options=options,
+    )
     postprocess = _postprocess_frames(frame_geometries, joint_by_name, clip, options)
+    postprocess = {**postprocess, **pre_postprocess}
     skeleton_frames = [
         frame.joints.tolist()
         for frame in frame_geometries

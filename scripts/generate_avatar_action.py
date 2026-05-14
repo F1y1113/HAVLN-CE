@@ -53,6 +53,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Post-process support/landing frames so low feet stay anchored to the floor.",
     )
+    parser.add_argument(
+        "--no-foot-orientation-lock",
+        action="store_true",
+        help="Disable contact-foot orientation stabilization when --foot-contact-lock is enabled.",
+    )
     parser.add_argument("--foot-contact-height", type=float, default=0.12)
     parser.add_argument("--foot-lock-blend-frames", type=int, default=4)
     parser.add_argument("--no-calibrated-leg-ik", action="store_true")
@@ -97,6 +102,7 @@ def main() -> None:
             preserve_root_motion=args.preserve_root_motion,
             stabilize_root_yaw=args.stabilize_root_yaw,
             foot_contact_lock=args.foot_contact_lock,
+            foot_orientation_lock=not args.no_foot_orientation_lock,
             foot_contact_height=args.foot_contact_height,
             foot_lock_blend_frames=args.foot_lock_blend_frames,
             calibrated_leg_ik=not args.no_calibrated_leg_ik,
