@@ -42,6 +42,7 @@ class MotionClip:
     local_rot_mats: np.ndarray
     root_positions: np.ndarray | None
     posed_joints: np.ndarray | None
+    foot_contacts: np.ndarray | None
     source_path: Path
     prompt: str | None = None
     fps: float | None = None
@@ -77,7 +78,14 @@ def _load_torch_smpl_params(path: Path, param_group: str = "body_params_global")
     if isinstance(segment_info, list) and segment_info:
         prompt = segment_info[0].get("caption")
     mats = _rotvecs_to_mats(global_orient, body_pose)
-    return MotionClip(local_rot_mats=mats, root_positions=root_positions, posed_joints=None, source_path=path, prompt=prompt)
+    return MotionClip(
+        local_rot_mats=mats,
+        root_positions=root_positions,
+        posed_joints=None,
+        foot_contacts=None,
+        source_path=path,
+        prompt=prompt,
+    )
 
 
 def load_motion_file(
@@ -97,6 +105,7 @@ def load_motion_file(
             local_rot_mats=data["local_rot_mats"].astype(np.float64),
             root_positions=None if root is None else root.astype(np.float64),
             posed_joints=data["posed_joints"].astype(np.float64) if "posed_joints" in data else None,
+            foot_contacts=data["foot_contacts"].astype(bool) if "foot_contacts" in data else None,
             source_path=motion_path,
             fps=fps,
         )
@@ -106,6 +115,7 @@ def load_motion_file(
             local_rot_mats=_rotvecs_to_mats(data["root_orient"], data["pose_body"]),
             root_positions=data["trans"].astype(np.float64) if "trans" in data else None,
             posed_joints=None,
+            foot_contacts=data["foot_contacts"].astype(bool) if "foot_contacts" in data else None,
             source_path=motion_path,
             fps=float(data["mocap_frame_rate"]) if "mocap_frame_rate" in data else None,
         )
@@ -139,11 +149,19 @@ def _resample_rotations(mats: np.ndarray, target_frames: int) -> np.ndarray:
     return out
 
 
+def _resample_contacts(values: np.ndarray | None, target_frames: int) -> np.ndarray | None:
+    if values is None or len(values) == target_frames:
+        return values
+    indices = np.rint(np.linspace(0, len(values) - 1, target_frames)).astype(np.int64)
+    return values[indices].astype(bool)
+
+
 def resample_motion(clip: MotionClip, target_frames: int) -> MotionClip:
     return MotionClip(
         local_rot_mats=_resample_rotations(clip.local_rot_mats, target_frames),
         root_positions=_resample_array(clip.root_positions, target_frames),
         posed_joints=_resample_array(clip.posed_joints, target_frames),
+        foot_contacts=_resample_contacts(clip.foot_contacts, target_frames),
         source_path=clip.source_path,
         prompt=clip.prompt,
         fps=clip.fps,

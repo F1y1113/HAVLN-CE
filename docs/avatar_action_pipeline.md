@@ -8,11 +8,12 @@ textured human asset:
 3. Retarget SMPL-22/Kimodo local rotations onto the selected avatar's own skin joints.
    When posed joints are available, legs use calibrated two-bone IK so the
    target avatar's own knee pole controls hip-knee-ankle bending.
-4. Export static HAPS frames while preserving the original avatar mesh, UVs, skin weights,
+4. Optionally stabilize stationary action yaw and lock support/landing feet after retargeting.
+5. Export static HAPS frames while preserving the original avatar mesh, UVs, skin weights,
    base-color textures, and PBR materials.
-5. Add a lightweight visible shell and Habitat-safe material flags so side/back
+6. Add a lightweight visible shell and Habitat-safe material flags so side/back
    cameras do not collapse thin clothing surfaces into paper-like cutouts.
-6. Write `skeleton.json`, `persona.json`, `frameXXX.glb`, and `frameXXX.object_config.json`.
+7. Write `skeleton.json`, `persona.json`, `frameXXX.glb`, and `frameXXX.object_config.json`.
 
 The key compatibility rule is: do not project a ViCo texture onto a different SMPL-X
 topology unless you explicitly want that lossy transfer. The stable path is to keep
@@ -76,6 +77,18 @@ Use `--rotation-scale` for the whole body, then only raise
 been verified to bend cleanly.
 
 Use `--no-calibrated-leg-ik` to disable the two-bone leg solver for debugging.
+
+For stationary acrobatics such as standing backflips, add:
+
+```bash
+--stabilize-root-yaw --foot-contact-lock
+```
+
+`--stabilize-root-yaw` removes unwanted horizontal spin while preserving the
+flip's pitch/roll. `--foot-contact-lock` detects low support/landing feet and
+keeps the whole body anchored to the contact point with a short blend at the
+segment edges. Tune `--foot-contact-height` and `--foot-lock-blend-frames` if a
+motion source marks contact too early or too late.
 
 ## Habitat Material And Thickness
 

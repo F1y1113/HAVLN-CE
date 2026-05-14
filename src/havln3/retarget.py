@@ -72,6 +72,10 @@ class RetargetOptions:
     preserve_root_motion: bool = False
     root_motion_scale: float = 1.0
     snap_to_ground: bool = True
+    stabilize_root_yaw: bool = False
+    foot_contact_lock: bool = False
+    foot_contact_height: float = 0.12
+    foot_lock_blend_frames: int = 4
     alpha_cutoff: float = 0.55
     material_roughness: float = 0.88
     detect_texture_alpha: bool = True
@@ -99,6 +103,12 @@ class LegCalibration:
     rest_pole_knee_local: np.ndarray
     rest_pole_foot_local: np.ndarray | None
     rest_toe_local: np.ndarray | None
+
+
+@dataclass
+class FrameGeometry:
+    vertices_by_primitive: list[np.ndarray]
+    joints: np.ndarray | None
 
 
 def _scaled_quat_from_matrix(matrix: np.ndarray, scale: float) -> np.ndarray:
@@ -473,6 +483,294 @@ def _root_offset(clip: MotionClip, frame_index: int, *, options: RetargetOptions
     return np.asarray(raw, dtype=np.float64)
 
 
+def _wrap_angle(angle: float) -> float:
+    return float((angle + np.pi) % (2.0 * np.pi) - np.pi)
+
+
+def _translate_frame(frame: FrameGeometry, delta: np.ndarray) -> None:
+    frame.vertices_by_primitive = [vertices + delta for vertices in frame.vertices_by_primitive]
+    if frame.joints is not None:
+        frame.joints = frame.joints + delta
+
+
+def _rotate_y(points: np.ndarray, angle: float, pivot: np.ndarray) -> np.ndarray:
+    rotation = Rotation.from_euler("y", angle).as_matrix()
+    return (points - pivot) @ rotation.T + pivot
+
+
+def _rotate_frame_y(frame: FrameGeometry, angle: float, pivot: np.ndarray) -> None:
+    frame.vertices_by_primitive = [_rotate_y(vertices, angle, pivot) for vertices in frame.vertices_by_primitive]
+    if frame.joints is not None:
+        frame.joints = _rotate_y(frame.joints, angle, pivot)
+
+
+def _joint_index(joint_by_name: dict[str, int], *names: str) -> int | None:
+    for name in names:
+        index = joint_by_name.get(name)
+        if index is not None:
+            return index
+    return None
+
+
+def _joint_point(
+    joints: np.ndarray,
+    joint_by_name: dict[str, int],
+    *names: str,
+) -> np.ndarray | None:
+    index = _joint_index(joint_by_name, *names)
+    if index is None:
+        return None
+    return joints[index]
+
+
+def _root_yaw_from_joints(joints: np.ndarray, joint_by_name: dict[str, int]) -> float | None:
+    left = _joint_point(joints, joint_by_name, "LeftUpLeg", "LeftLeg", "LeftFoot")
+    right = _joint_point(joints, joint_by_name, "RightUpLeg", "RightLeg", "RightFoot")
+    if left is None or right is None:
+        return None
+    side = right - left
+    side[1] = 0.0
+    side_unit = _safe_unit(side)
+    if side_unit is None:
+        return None
+    return float(np.arctan2(side_unit[2], side_unit[0]))
+
+
+def _frame_pivot(frame: FrameGeometry, joint_by_name: dict[str, int]) -> np.ndarray:
+    if frame.joints is not None:
+        hips = _joint_point(frame.joints, joint_by_name, "Hips")
+        if hips is not None:
+            return hips
+        return frame.joints.mean(axis=0)
+    return np.vstack(frame.vertices_by_primitive).mean(axis=0)
+
+
+def _apply_root_yaw_stabilization(
+    frames: list[FrameGeometry],
+    joint_by_name: dict[str, int],
+) -> dict[str, Any]:
+    reference_yaw: float | None = None
+    yaw_deltas: list[float] = []
+    for frame in frames:
+        if frame.joints is None:
+            continue
+        yaw = _root_yaw_from_joints(frame.joints.copy(), joint_by_name)
+        if yaw is None:
+            continue
+        reference_yaw = yaw
+        break
+
+    if reference_yaw is None:
+        return {"enabled": True, "frames_adjusted": 0, "reason": "missing hip/leg joints"}
+
+    for frame in frames:
+        if frame.joints is None:
+            continue
+        yaw = _root_yaw_from_joints(frame.joints.copy(), joint_by_name)
+        if yaw is None:
+            yaw_deltas.append(0.0)
+            continue
+        delta = _wrap_angle(yaw - reference_yaw)
+        yaw_deltas.append(delta)
+        if abs(delta) > 1e-6:
+            _rotate_frame_y(frame, delta, _frame_pivot(frame, joint_by_name))
+
+    return {
+        "enabled": True,
+        "reference_yaw_degrees": float(np.degrees(reference_yaw)),
+        "frames_adjusted": int(sum(abs(delta) > 1e-6 for delta in yaw_deltas)),
+        "max_yaw_delta_degrees": float(np.degrees(max((abs(delta) for delta in yaw_deltas), default=0.0))),
+    }
+
+
+def _foot_points(
+    joints: np.ndarray,
+    joint_by_name: dict[str, int],
+    side: str,
+) -> tuple[np.ndarray | None, float | None]:
+    indices = [
+        joint_by_name[name]
+        for name in (f"{side}Foot", f"{side}ToeBase")
+        if name in joint_by_name
+    ]
+    if not indices:
+        return None, None
+    points = joints[indices]
+    return points.mean(axis=0), float(points[:, 1].min())
+
+
+def _contiguous_segments(mask: np.ndarray) -> list[tuple[int, int]]:
+    segments: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, value in enumerate(mask):
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            segments.append((start, index - 1))
+            start = None
+    if start is not None:
+        segments.append((start, len(mask) - 1))
+    return segments
+
+
+def _edge_blend_weight(index: int, start: int, end: int, frame_count: int, blend_frames: int) -> float:
+    if blend_frames <= 0:
+        return 1.0
+    weight = 1.0
+    if start > 0:
+        weight = min(weight, (index - start + 1) / (blend_frames + 1))
+    if end < frame_count - 1:
+        weight = min(weight, (end - index + 1) / (blend_frames + 1))
+    return float(np.clip(weight, 0.0, 1.0))
+
+
+def _source_foot_contact_mask(foot_contacts: np.ndarray | None, frame_count: int) -> np.ndarray | None:
+    if foot_contacts is None or len(foot_contacts) != frame_count:
+        return None
+    if foot_contacts.ndim != 2 or foot_contacts.shape[1] < 2:
+        return None
+    contacts = foot_contacts.astype(bool)
+    left = contacts[:, : min(2, contacts.shape[1])].any(axis=1)
+    if contacts.shape[1] >= 4:
+        right = contacts[:, 2:4].any(axis=1)
+    else:
+        right = contacts[:, -1]
+    return np.column_stack([left, right])
+
+
+def _select_lock_segments(support_mask: np.ndarray) -> list[tuple[int, int]]:
+    frame_count = len(support_mask)
+    segments = _contiguous_segments(support_mask)
+    selected: list[tuple[int, int]] = []
+    start_window_end = max(1, frame_count // 5)
+    landing_window_start = max(0, int(frame_count * 0.55))
+    for start, end in segments:
+        if start <= start_window_end or end >= landing_window_start:
+            selected.append((start, end))
+    if not any(end >= landing_window_start for _, end in selected):
+        lock_frames = max(3, min(8, frame_count // 5))
+        selected.append((frame_count - lock_frames, frame_count - 1))
+    return selected
+
+
+def _apply_foot_contact_lock(
+    frames: list[FrameGeometry],
+    joint_by_name: dict[str, int],
+    *,
+    ground_y: float,
+    contact_height: float,
+    blend_frames: int,
+    source_foot_contacts: np.ndarray | None = None,
+) -> dict[str, Any]:
+    frame_count = len(frames)
+    centers = np.full((frame_count, 2, 3), np.nan, dtype=np.float64)
+    lows = np.full((frame_count, 2), np.nan, dtype=np.float64)
+    for frame_index, frame in enumerate(frames):
+        if frame.joints is None:
+            continue
+        for side_index, side in enumerate(("Left", "Right")):
+            center, low = _foot_points(frame.joints, joint_by_name, side)
+            if center is not None and low is not None:
+                centers[frame_index, side_index] = center
+                lows[frame_index, side_index] = low
+
+    if np.isnan(lows).all():
+        return {"enabled": True, "locked_frames": 0, "reason": "missing foot joints"}
+
+    contact_mask = lows <= (ground_y + contact_height)
+    source_mask = _source_foot_contact_mask(source_foot_contacts, frame_count)
+    if source_mask is not None:
+        contact_mask = contact_mask | (source_mask & (lows <= ground_y + contact_height * 2.0))
+    contact_mask = np.nan_to_num(contact_mask, nan=False).astype(bool)
+    support_mask = contact_mask.any(axis=1)
+    segments = _select_lock_segments(support_mask)
+
+    locked_frames: set[int] = set()
+    applied_segments: list[dict[str, Any]] = []
+    for start, end in segments:
+        if start > end:
+            continue
+        segment_mask = contact_mask[start : end + 1]
+        side_indices = [index for index in range(2) if segment_mask[:, index].any()]
+        if not side_indices:
+            anchor_lows = lows[start]
+            if np.isnan(anchor_lows).all():
+                continue
+            side_indices = [int(np.nanargmin(anchor_lows))]
+
+        anchor_frame = start
+        segment_record = {
+            "start": int(start),
+            "end": int(end),
+            "anchor_frame": int(anchor_frame),
+            "sides": ["Left" if index == 0 else "Right" for index in side_indices],
+        }
+        applied_segments.append(segment_record)
+        for frame_index in range(start, end + 1):
+            deltas = []
+            for side_index in side_indices:
+                current = centers[frame_index, side_index]
+                anchor = centers[anchor_frame, side_index]
+                low = lows[frame_index, side_index]
+                if np.isnan(current).any() or np.isnan(anchor).any() or np.isnan(low):
+                    continue
+                delta = np.array(
+                    [
+                        anchor[0] - current[0],
+                        ground_y - low,
+                        anchor[2] - current[2],
+                    ],
+                    dtype=np.float64,
+                )
+                deltas.append(delta)
+            if not deltas:
+                continue
+            weight = _edge_blend_weight(frame_index, start, end, frame_count, blend_frames)
+            delta = np.mean(deltas, axis=0) * weight
+            _translate_frame(frames[frame_index], delta)
+            locked_frames.add(frame_index)
+
+    ground_lifts = 0
+    for frame in frames:
+        lowest = min(float(vertices[:, 1].min()) for vertices in frame.vertices_by_primitive)
+        if lowest < ground_y:
+            _translate_frame(frame, np.array([0.0, ground_y - lowest, 0.0], dtype=np.float64))
+            ground_lifts += 1
+
+    return {
+        "enabled": True,
+        "locked_frames": len(locked_frames),
+        "segments": applied_segments,
+        "ground_lift_frames": ground_lifts,
+        "contact_height": contact_height,
+        "blend_frames": blend_frames,
+    }
+
+
+def _postprocess_frames(
+    frames: list[FrameGeometry],
+    joint_by_name: dict[str, int],
+    clip: MotionClip,
+    options: RetargetOptions,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "root_yaw_stabilization": {"enabled": False},
+        "foot_contact_lock": {"enabled": False},
+    }
+    if options.stabilize_root_yaw:
+        report["root_yaw_stabilization"] = _apply_root_yaw_stabilization(frames, joint_by_name)
+    if options.foot_contact_lock:
+        report["foot_contact_lock"] = _apply_foot_contact_lock(
+            frames,
+            joint_by_name,
+            ground_y=options.ground_y,
+            contact_height=options.foot_contact_height,
+            blend_frames=options.foot_lock_blend_frames,
+            source_foot_contacts=clip.foot_contacts,
+        )
+    return report
+
+
 def _boundary_edges(faces: np.ndarray) -> np.ndarray:
     edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
     sorted_edges = np.sort(edges, axis=1)
@@ -597,7 +895,7 @@ def retarget_motion_to_avatar(
 
     material_changes: dict[str, Any] = {}
     bounds: list[dict[str, list[float]]] = []
-    skeleton_frames: list[list[list[float]]] = []
+    frame_geometries: list[FrameGeometry] = []
     joint_names = [joint_base_name(gltf.nodes[joint].name) for joint in skin.joints]
 
     for frame_index in range(options.frames):
@@ -623,11 +921,18 @@ def retarget_motion_to_avatar(
             root_offset=_root_offset(clip, frame_index, options=options),
             snap_to_ground=options.snap_to_ground,
         )
-        if transformed_joints is not None:
-            skeleton_frames.append(transformed_joints.tolist())
+        frame_geometries.append(FrameGeometry(vertices_by_primitive=transformed, joints=transformed_joints))
 
+    postprocess = _postprocess_frames(frame_geometries, joint_by_name, clip, options)
+    skeleton_frames = [
+        frame.joints.tolist()
+        for frame in frame_geometries
+        if frame.joints is not None
+    ]
+
+    for frame_index, frame in enumerate(frame_geometries):
         glb_path = output_dir / f"frame{frame_index:03d}.glb"
-        _export_frame(glb_path, transformed, source_geometries, options=options)
+        _export_frame(glb_path, frame.vertices_by_primitive, source_geometries, options=options)
         material_changes[glb_path.name] = fix_habitat_materials(
             glb_path,
             alpha_cutoff=options.alpha_cutoff,
@@ -636,7 +941,7 @@ def retarget_motion_to_avatar(
         )
         write_object_config(output_dir / f"frame{frame_index:03d}.object_config.json", glb_path)
 
-        combined = np.vstack(transformed)
+        combined = np.vstack(frame.vertices_by_primitive)
         bounds.append({"min": combined.min(axis=0).tolist(), "max": combined.max(axis=0).tolist()})
 
     skeleton = {
@@ -649,6 +954,7 @@ def retarget_motion_to_avatar(
             "strategy": "calibrated two-bone IK with target-rig knee pole constraints",
             "legs": [calibration.side for calibration in leg_calibrations],
         },
+        "postprocess": postprocess,
     }
     (output_dir / "skeleton.json").write_text(json.dumps(skeleton, indent=2), encoding="utf-8")
 
@@ -663,7 +969,8 @@ def retarget_motion_to_avatar(
         "appearance_strategy": "preserve original ViCo/Mixamo skinned GLB mesh, UVs, skin weights, and textures",
         "retarget_strategy": (
             "map SMPL-22/GEM/Kimodo local rotations to compatible ViCo/Mixamo skin joints; "
-            "when posed joints are available, solve calibrated two-bone leg IK using the target rig knee pole"
+            "when posed joints are available, solve calibrated two-bone leg IK using the target rig knee pole; "
+            "optionally stabilize root yaw and lock support feet during contact/landing"
         ),
         "selection": selection or {},
         "material_strategy": {
@@ -674,6 +981,7 @@ def retarget_motion_to_avatar(
             "body_shell_thickness_m": options.body_shell_thickness,
             "hair_shell_thickness_m": options.hair_shell_thickness,
         },
+        "postprocess": postprocess,
     }
     (output_dir / "persona.json").write_text(json.dumps(persona, indent=2), encoding="utf-8")
     (output_dir / "habitat_material_fix_report.json").write_text(
@@ -695,5 +1003,6 @@ def retarget_motion_to_avatar(
         "max_top_y": max(item["max"][1] for item in bounds),
         "max_height": max(item["max"][1] - item["min"][1] for item in bounds),
         "leg_ik": skeleton["leg_ik"],
+        "postprocess": postprocess,
     }
     return report

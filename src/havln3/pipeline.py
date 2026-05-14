@@ -42,6 +42,10 @@ class AvatarActionRequest:
     foot_rotation_scale: float = 0.35
     include_root_orientation: bool = True
     preserve_root_motion: bool = False
+    stabilize_root_yaw: bool = False
+    foot_contact_lock: bool = False
+    foot_contact_height: float = 0.12
+    foot_lock_blend_frames: int = 4
     calibrated_leg_ik: bool = True
     prefer_joint_position_ik: bool = False
     solidify_shell: bool = True
@@ -87,6 +91,10 @@ class AvatarActionPipeline:
             foot_rotation_scale=request.foot_rotation_scale,
             include_root_orientation=request.include_root_orientation,
             preserve_root_motion=request.preserve_root_motion,
+            stabilize_root_yaw=request.stabilize_root_yaw,
+            foot_contact_lock=request.foot_contact_lock,
+            foot_contact_height=request.foot_contact_height,
+            foot_lock_blend_frames=request.foot_lock_blend_frames,
             calibrated_leg_ik=request.calibrated_leg_ik,
             prefer_joint_position_ik=request.prefer_joint_position_ik,
             solidify_shell=request.solidify_shell,

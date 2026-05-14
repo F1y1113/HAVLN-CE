@@ -43,6 +43,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--foot-rotation-scale", type=float, default=0.35)
     parser.add_argument("--no-root-orientation", action="store_true")
     parser.add_argument("--preserve-root-motion", action="store_true")
+    parser.add_argument(
+        "--stabilize-root-yaw",
+        action="store_true",
+        help="Post-process stationary flips/poses so the avatar keeps its initial horizontal facing.",
+    )
+    parser.add_argument(
+        "--foot-contact-lock",
+        action="store_true",
+        help="Post-process support/landing frames so low feet stay anchored to the floor.",
+    )
+    parser.add_argument("--foot-contact-height", type=float, default=0.12)
+    parser.add_argument("--foot-lock-blend-frames", type=int, default=4)
     parser.add_argument("--no-calibrated-leg-ik", action="store_true")
     parser.add_argument("--no-solidify-shell", action="store_true")
     parser.add_argument("--body-shell-thickness", type=float, default=0.018)
@@ -83,6 +95,10 @@ def main() -> None:
             foot_rotation_scale=args.foot_rotation_scale,
             include_root_orientation=not args.no_root_orientation,
             preserve_root_motion=args.preserve_root_motion,
+            stabilize_root_yaw=args.stabilize_root_yaw,
+            foot_contact_lock=args.foot_contact_lock,
+            foot_contact_height=args.foot_contact_height,
+            foot_lock_blend_frames=args.foot_lock_blend_frames,
             calibrated_leg_ik=not args.no_calibrated_leg_ik,
             prefer_joint_position_ik=args.joint_ik,
             solidify_shell=not args.no_solidify_shell,
