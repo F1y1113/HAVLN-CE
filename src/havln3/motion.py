@@ -246,10 +246,19 @@ def generate_kimodo_motion_candidates(
 
 
 def _generated_motion_candidates(output_stem: Path) -> list[tuple[Path, Path | None]]:
-    candidates = sorted(output_stem.parent.glob(f"{output_stem.name}*.npz"))
+    candidates: list[Path] = []
+
+    def append_unique(paths: list[Path]) -> None:
+        for path in paths:
+            if path.exists() and path not in candidates:
+                candidates.append(path)
+
     direct = output_stem.with_suffix(".npz")
-    if direct.exists() and direct not in candidates:
-        candidates.insert(0, direct)
+    append_unique([direct])
+    append_unique(sorted(output_stem.parent.glob(f"{output_stem.name}*.npz")))
+    append_unique(sorted((output_stem.parent / output_stem.name).glob(f"{output_stem.name}*.npz")))
+    if output_stem.is_dir():
+        append_unique(sorted(output_stem.glob(f"{output_stem.name}*.npz")))
     if not candidates:
         return []
 
@@ -258,10 +267,13 @@ def _generated_motion_candidates(output_stem: Path) -> list[tuple[Path, Path | N
         suffix = motion_path.stem.removeprefix(output_stem.name).lstrip("_")
         companion_names = [
             motion_path.with_name(motion_path.stem + "_amass.npz"),
+            motion_path.parent / f"amass_{suffix}.npz" if suffix else None,
             output_stem.with_name(output_stem.name + "_amass.npz"),
         ]
         if suffix:
             companion_names.append(output_stem.with_name(f"amass_{suffix}.npz"))
-        amass_path = next((path for path in companion_names if path.exists()), None)
+            companion_names.append(output_stem / f"amass_{suffix}.npz")
+        companion_names.append(output_stem / f"{output_stem.name}_amass.npz")
+        amass_path = next((path for path in companion_names if path and path.exists()), None)
         result.append((motion_path, amass_path))
     return result

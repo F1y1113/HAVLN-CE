@@ -15,6 +15,10 @@ if str(SRC_ROOT) not in sys.path:
 from havln3.motion_quality import MotionQualityOptions, rank_motion_files  # noqa: E402
 
 
+def is_motion_candidate(path: Path) -> bool:
+    return path.suffix in {".npz", ".pt"} and not path.stem.startswith("amass_") and not path.stem.endswith("_amass")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rank Kimodo/GEM motion samples before retargeting.")
     parser.add_argument("paths", nargs="+", type=Path, help="Motion .npz/.pt files or directories.")
@@ -32,9 +36,11 @@ def expand_paths(paths: list[Path]) -> list[Path]:
         if path.is_dir():
             expanded.extend(sorted(path.glob("*.npz")))
             expanded.extend(sorted(path.glob("*.pt")))
+            expanded.extend(sorted(path.glob("*/*.npz")))
+            expanded.extend(sorted(path.glob("*/*.pt")))
         else:
             expanded.extend(sorted(path.parent.glob(path.name)) if any(ch in path.name for ch in "*?[]") else [path])
-    return [path for path in expanded if path.exists()]
+    return [path for path in expanded if path.exists() and is_motion_candidate(path)]
 
 
 def main() -> None:
