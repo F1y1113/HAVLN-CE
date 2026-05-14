@@ -60,7 +60,8 @@ def test_pipeline_exports_textured_frames_and_skeleton(tmp_path: Path) -> None:
     assert len(skeleton["frames"]) == 2
     assert len(skeleton["frames"][0]) == len(skeleton["joint_names"])
     assert skeleton["leg_ik"]["enabled"] is True
-    assert skeleton["leg_ik"]["strategy"] == "calibrated two-bone IK with target-rig knee pole constraints"
+    assert skeleton["leg_ik"]["body_relative"] is False
+    assert "two-bone IK" in skeleton["leg_ik"]["strategy"]
 
     frame = GLTF2().load(str(result.asset_dir / "frame000.glb"))
     for material in frame.materials or []:

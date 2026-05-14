@@ -78,6 +78,12 @@ been verified to bend cleanly.
 
 Use `--no-calibrated-leg-ik` to disable the two-bone leg solver for debugging.
 
+Keep retargeting low-intrusion by default. `--body-relative-leg-ik` and
+`--airborne-leg-stabilization` are experimental opt-in tools for diagnosing a
+bad motion source, not default production fixes. If an airborne acrobatic pose
+folds the human into itself, prefer regenerating or selecting a cleaner
+Kimodo/GEM motion source over forcing a canonical tuck in post-processing.
+
 For stationary acrobatics such as standing backflips, add:
 
 ```bash

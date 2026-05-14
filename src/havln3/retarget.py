@@ -59,6 +59,14 @@ SMPL_LEG_JOINTS = {
 }
 
 GLTF_UP = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+SOURCE_TO_AVATAR_AXES = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+    ],
+    dtype=np.float64,
+)
 
 
 @dataclass(frozen=True)
@@ -79,10 +87,14 @@ class RetargetOptions:
     foot_orientation_lock: bool = True
     foot_contact_height: float = 0.12
     foot_lock_blend_frames: int = 4
+    airborne_leg_stabilization: bool = False
+    airborne_leg_stabilization_strength: float = 0.85
+    airborne_tuck_reach_ratio: float = 0.52
     alpha_cutoff: float = 0.55
     material_roughness: float = 0.88
     detect_texture_alpha: bool = True
     calibrated_leg_ik: bool = True
+    body_relative_leg_ik: bool = False
     prefer_joint_position_ik: bool = False
     solidify_shell: bool = True
     body_shell_thickness: float = 0.018
@@ -122,6 +134,13 @@ class FootContactAnalysis:
     lows: np.ndarray
     contact_mask: np.ndarray
     segments: list[tuple[int, int]]
+
+
+@dataclass(frozen=True)
+class AirborneLegGuide:
+    direction_local: np.ndarray
+    reach_ratio: float
+    skip_foot_ik: bool = True
 
 
 def _scaled_quat_from_matrix(matrix: np.ndarray, scale: float) -> np.ndarray:
@@ -172,6 +191,10 @@ def _source_to_avatar_axes(points: np.ndarray) -> np.ndarray:
     return points[:, [0, 2, 1]]
 
 
+def _source_rotation_to_avatar_axes(matrix: np.ndarray) -> Rotation:
+    return Rotation.from_matrix(SOURCE_TO_AVATAR_AXES @ matrix @ SOURCE_TO_AVATAR_AXES.T)
+
+
 def _safe_unit(vector: np.ndarray) -> np.ndarray | None:
     norm = float(np.linalg.norm(vector))
     if norm < 1e-8:
@@ -190,6 +213,59 @@ def _node_parent_indices(gltf: GLTF2) -> dict[int, int]:
 def _projected_unit(vector: np.ndarray, normal: np.ndarray) -> np.ndarray | None:
     projected = vector - normal * float(np.dot(vector, normal))
     return _safe_unit(projected)
+
+
+def _orthonormal_body_basis(side: np.ndarray, up_hint: np.ndarray) -> np.ndarray | None:
+    side_unit = _safe_unit(side)
+    if side_unit is None:
+        return None
+    up_unit = _projected_unit(up_hint, side_unit)
+    if up_unit is None:
+        up_unit = _fallback_pole(side_unit)
+    forward_unit = _safe_unit(np.cross(side_unit, up_unit))
+    if forward_unit is None:
+        return None
+    up_unit = _safe_unit(np.cross(forward_unit, side_unit))
+    if up_unit is None:
+        return None
+    return np.column_stack([side_unit, up_unit, forward_unit])
+
+
+def _source_body_basis(source: np.ndarray) -> np.ndarray | None:
+    if len(source) <= 3:
+        return None
+    hips = source[0]
+    side = source[SMPL_LEG_JOINTS["Right"]["hip"]] - source[SMPL_LEG_JOINTS["Left"]["hip"]]
+    for spine_index in (9, 6, 3, 15):
+        if spine_index < len(source):
+            basis = _orthonormal_body_basis(side, source[spine_index] - hips)
+            if basis is not None:
+                return basis
+    return None
+
+
+def _target_body_basis_from_globals(
+    globals_: list[np.ndarray],
+    skin: Any,
+    joint_by_name: dict[str, int],
+) -> np.ndarray | None:
+    hips_index = joint_by_name.get("Hips")
+    left_index = joint_by_name.get("LeftUpLeg")
+    right_index = joint_by_name.get("RightUpLeg")
+    if hips_index is None or left_index is None or right_index is None:
+        return None
+    hips = globals_[skin.joints[hips_index]][:3, 3]
+    left = globals_[skin.joints[left_index]][:3, 3]
+    right = globals_[skin.joints[right_index]][:3, 3]
+    side = right - left
+    for spine_name in ("Spine2", "Spine1", "Spine", "Neck", "Head"):
+        spine_index = joint_by_name.get(spine_name)
+        if spine_index is None:
+            continue
+        basis = _orthonormal_body_basis(side, globals_[skin.joints[spine_index]][:3, 3] - hips)
+        if basis is not None:
+            return basis
+    return None
 
 
 def _fallback_pole(direction: np.ndarray) -> np.ndarray:
@@ -322,19 +398,59 @@ def _two_bone_knee_position(
     return knee, ankle
 
 
+def _source_body_relative_direction(
+    direction: np.ndarray,
+    *,
+    source_body_basis: np.ndarray | None = None,
+    target_body_basis: np.ndarray | None = None,
+    source_global_rotations: dict[int, Rotation] | None = None,
+    source_parent_index: int | None = None,
+    target_parent_rotation: Rotation = Rotation.identity(),
+) -> np.ndarray | None:
+    direction_unit = _safe_unit(direction)
+    if direction_unit is None:
+        return None
+    if source_body_basis is not None and target_body_basis is not None:
+        local_direction = source_body_basis.T @ direction_unit
+        mapped = target_body_basis @ local_direction
+        mapped_unit = _safe_unit(mapped)
+        return mapped_unit if mapped_unit is not None else direction_unit
+    if source_global_rotations is None or source_parent_index is None:
+        return direction_unit
+    source_parent_rotation = source_global_rotations.get(source_parent_index)
+    if source_parent_rotation is None:
+        return direction_unit
+    local_direction = source_parent_rotation.inv().apply(direction_unit)
+    mapped = target_parent_rotation.apply(local_direction)
+    mapped_unit = _safe_unit(mapped)
+    return mapped_unit if mapped_unit is not None else direction_unit
+
+
 def _apply_calibrated_leg_ik(
     *,
     local: np.ndarray,
     source_joints: np.ndarray,
+    source_global_rot_mats: np.ndarray | None,
     gltf: GLTF2,
+    joint_by_name: dict[str, int],
     calibrations: list[LegCalibration],
+    body_relative: bool,
+    leg_guide: dict[str, AirborneLegGuide] | None = None,
 ) -> np.ndarray:
     if not calibrations:
         return local
 
     skin = gltf.skins[0]
     source = _source_to_avatar_axes(source_joints.astype(np.float64))
+    source_basis = _source_body_basis(source) if body_relative else None
+    source_global_rotations: dict[int, Rotation] | None = None
+    if body_relative and source_global_rot_mats is not None:
+        source_global_rotations = {
+            index: _source_rotation_to_avatar_axes(source_global_rot_mats[index].astype(np.float64))
+            for index in range(min(len(source_global_rot_mats), len(SMPL22_TO_MIXAMO)))
+        }
     current_globals = node_global_matrices(gltf, local)
+    target_basis = _target_body_basis_from_globals(current_globals, skin, joint_by_name) if body_relative else None
     local_rest_rot = {
         skin_index: _local_rest_rotation(gltf, node_index) for skin_index, node_index in enumerate(skin.joints)
     }
@@ -344,22 +460,37 @@ def _apply_calibrated_leg_ik(
         source_hip = source[source_map["hip"]]
         source_knee = source[source_map["knee"]]
         source_ankle = source[source_map["ankle"]]
-        source_direction = _safe_unit(source_ankle - source_hip)
-        if source_direction is None:
-            continue
 
         source_upper_len = float(np.linalg.norm(source_knee - source_hip))
         source_lower_len = float(np.linalg.norm(source_ankle - source_knee))
         source_chain_len = source_upper_len + source_lower_len
         if source_chain_len < 1e-8:
             continue
-        reach_ratio = float(np.linalg.norm(source_ankle - source_hip) / source_chain_len)
+        guide = leg_guide.get(calibration.side) if leg_guide is not None else None
+        reach_ratio = (
+            guide.reach_ratio
+            if guide is not None
+            else float(np.linalg.norm(source_ankle - source_hip) / source_chain_len)
+        )
 
         parent_rot = (
             _rotation_from_matrix(current_globals[calibration.parent_node])
             if calibration.parent_node is not None
             else Rotation.identity()
         )
+        if guide is not None and target_basis is not None:
+            source_direction = _safe_unit(target_basis @ guide.direction_local)
+        else:
+            source_direction = _source_body_relative_direction(
+                source_ankle - source_hip,
+                source_body_basis=source_basis,
+                target_body_basis=target_basis,
+                source_global_rotations=source_global_rotations,
+                source_parent_index=SMPL22_PARENTS[source_map["hip"]],
+                target_parent_rotation=parent_rot,
+            )
+        if source_direction is None:
+            continue
         pole = parent_rot.apply(calibration.rest_pole_parent_local)
         pole = _projected_unit(pole, source_direction)
         if pole is None:
@@ -400,12 +531,20 @@ def _apply_calibrated_leg_ik(
         local[calibration.knee] = knee_delta.as_quat()
 
         if (
-            calibration.toe is not None
+            (guide is None or not guide.skip_foot_ik)
+            and calibration.toe is not None
             and calibration.rest_toe_local is not None
             and calibration.rest_pole_foot_local is not None
         ):
             source_toe = source[source_map["toe"]]
-            source_toe_direction = _safe_unit(source_toe - source_ankle)
+            source_toe_direction = _source_body_relative_direction(
+                source_toe - source_ankle,
+                source_body_basis=source_basis,
+                target_body_basis=target_basis,
+                source_global_rotations=source_global_rotations,
+                source_parent_index=source_map["knee"],
+                target_parent_rotation=hip_global_rot * local_rest_rot[calibration.knee] * knee_delta,
+            )
             if source_toe_direction is not None:
                 knee_global_rot = hip_global_rot * local_rest_rot[calibration.knee] * knee_delta
                 desired_foot_rot = _basis_rotation(
@@ -739,6 +878,149 @@ def _foot_contact_analysis(
         contact_mask=contact_mask,
         segments=_select_lock_segments(support_mask),
     )
+
+
+def _smooth_unit_vectors(vectors: np.ndarray, valid: np.ndarray, *, radius: int = 2) -> np.ndarray:
+    smoothed = vectors.copy()
+    for index in range(len(vectors)):
+        if not valid[index]:
+            continue
+        start = max(0, index - radius)
+        end = min(len(vectors), index + radius + 1)
+        window = vectors[start:end][valid[start:end]]
+        if len(window) == 0:
+            continue
+        average = _safe_unit(window.mean(axis=0))
+        if average is not None:
+            smoothed[index] = average
+    return smoothed
+
+
+def _canonical_airborne_leg_direction(side: str, tuck: float) -> np.ndarray:
+    side_offset = -0.08 if side == "Left" else 0.08
+    extended = np.array([side_offset, -0.98, 0.08], dtype=np.float64)
+    tucked = np.array([side_offset, -0.20, 0.98], dtype=np.float64)
+    blended = extended * (1.0 - tuck) + tucked * tuck
+    direction = _safe_unit(blended)
+    return direction if direction is not None else tucked
+
+
+def _airborne_leg_guides(
+    *,
+    clip: MotionClip,
+    rough_frames: list[FrameGeometry],
+    joint_by_name: dict[str, int],
+    options: RetargetOptions,
+) -> tuple[list[dict[str, AirborneLegGuide] | None], dict[str, Any]]:
+    frame_count = len(rough_frames)
+    guides: list[dict[str, AirborneLegGuide] | None] = [None for _ in range(frame_count)]
+    if clip.posed_joints is None:
+        return guides, {"enabled": True, "guided_frames": 0, "reason": "missing posed joints"}
+
+    analysis = _foot_contact_analysis(
+        rough_frames,
+        joint_by_name,
+        ground_y=options.ground_y,
+        contact_height=options.foot_contact_height,
+        source_foot_contacts=None,
+    )
+    if analysis is None:
+        return guides, {"enabled": True, "guided_frames": 0, "reason": "missing foot joints"}
+
+    support_mask = analysis.contact_mask.any(axis=1)
+    air_segments = [
+        (start, end)
+        for start, end in _contiguous_segments(~support_mask)
+        if end - start + 1 >= 3
+    ]
+    if not air_segments:
+        return guides, {"enabled": True, "guided_frames": 0, "segments": []}
+
+    local_dirs = {side: np.zeros((frame_count, 3), dtype=np.float64) for side in ("Left", "Right")}
+    reach_ratios = {side: np.ones(frame_count, dtype=np.float64) for side in ("Left", "Right")}
+    valid = {side: np.zeros(frame_count, dtype=bool) for side in ("Left", "Right")}
+
+    for frame_index in range(frame_count):
+        source = _source_to_avatar_axes(clip.posed_joints[frame_index].astype(np.float64))
+        basis = _source_body_basis(source)
+        if basis is None:
+            continue
+        for side in ("Left", "Right"):
+            source_map = SMPL_LEG_JOINTS[side]
+            hip = source[source_map["hip"]]
+            knee = source[source_map["knee"]]
+            ankle = source[source_map["ankle"]]
+            direction = _safe_unit(ankle - hip)
+            upper = float(np.linalg.norm(knee - hip))
+            lower = float(np.linalg.norm(ankle - knee))
+            chain = upper + lower
+            if direction is None or chain < 1e-8:
+                continue
+            local_direction = _safe_unit(basis.T @ direction)
+            if local_direction is None:
+                continue
+            local_dirs[side][frame_index] = local_direction
+            reach_ratios[side][frame_index] = float(np.linalg.norm(ankle - hip) / chain)
+            valid[side][frame_index] = True
+
+    smoothed_dirs = {
+        side: _smooth_unit_vectors(local_dirs[side], valid[side], radius=2)
+        for side in ("Left", "Right")
+    }
+    strength = float(np.clip(options.airborne_leg_stabilization_strength, 0.0, 1.0))
+    guided_frames: set[int] = set()
+    segment_records: list[dict[str, int]] = []
+
+    for start, end in air_segments:
+        span = max(1, end - start)
+        segment_records.append({"start": int(start), "end": int(end)})
+        for frame_index in range(start, end + 1):
+            phase = (frame_index - start) / span
+            tuck = float(np.sin(np.pi * phase))
+            blend = strength * (0.35 + 0.65 * tuck)
+            blend *= _edge_blend_weight(
+                frame_index,
+                start,
+                end,
+                frame_count,
+                options.foot_lock_blend_frames,
+            )
+            if blend <= 0.0:
+                continue
+            frame_guides: dict[str, AirborneLegGuide] = {}
+            for side in ("Left", "Right"):
+                if not valid[side][frame_index]:
+                    continue
+                canonical_direction = _canonical_airborne_leg_direction(side, tuck)
+                direction = _safe_unit(
+                    smoothed_dirs[side][frame_index] * (1.0 - blend)
+                    + canonical_direction * blend
+                )
+                if direction is None:
+                    continue
+                canonical_reach = (1.0 - tuck) * 0.96 + tuck * options.airborne_tuck_reach_ratio
+                reach_ratio = float(
+                    reach_ratios[side][frame_index] * (1.0 - blend) + canonical_reach * blend
+                )
+                frame_guides[side] = AirborneLegGuide(
+                    direction_local=direction,
+                    reach_ratio=reach_ratio,
+                )
+            if frame_guides:
+                guides[frame_index] = frame_guides
+                guided_frames.add(frame_index)
+
+    return guides, {
+        "enabled": True,
+        "guided_frames": len(guided_frames),
+        "segments": segment_records,
+        "strength": strength,
+        "tuck_reach_ratio": options.airborne_tuck_reach_ratio,
+        "strategy": (
+            "smooth airborne leg directions in source pelvis-local space and blend them toward "
+            "a symmetric backflip tuck curve before target-rig two-bone IK"
+        ),
+    }
 
 
 def _apply_foot_contact_lock(
@@ -1123,26 +1405,60 @@ def retarget_motion_to_avatar(
 
     material_changes: dict[str, Any] = {}
     bounds: list[dict[str, list[float]]] = []
-    local_quats_by_frame: list[np.ndarray] = []
     joint_names = [joint_base_name(gltf.nodes[joint].name) for joint in skin.joints]
 
-    for frame_index in range(options.frames):
-        if options.prefer_joint_position_ik and clip.posed_joints is not None:
-            local_quats = _ik_local_quats_for_frame(clip.posed_joints[frame_index], gltf, joint_by_name)
-        else:
-            local_quats = _local_quats_for_frame(
-                clip.local_rot_mats[frame_index], joint_by_name, options=options
-            )
-            if leg_ik_enabled:
-                local_quats = _apply_calibrated_leg_ik(
-                    local=local_quats,
-                    source_joints=clip.posed_joints[frame_index],
-                    gltf=gltf,
-                    calibrations=leg_calibrations,
+    def build_local_quats_by_frame(
+        leg_guides: list[dict[str, AirborneLegGuide] | None] | None = None,
+    ) -> list[np.ndarray]:
+        quats_by_frame: list[np.ndarray] = []
+        for frame_index in range(options.frames):
+            if options.prefer_joint_position_ik and clip.posed_joints is not None:
+                local_quats = _ik_local_quats_for_frame(clip.posed_joints[frame_index], gltf, joint_by_name)
+            else:
+                local_quats = _local_quats_for_frame(
+                    clip.local_rot_mats[frame_index], joint_by_name, options=options
                 )
-        local_quats_by_frame.append(local_quats)
+                if leg_ik_enabled:
+                    local_quats = _apply_calibrated_leg_ik(
+                        local=local_quats,
+                        source_joints=clip.posed_joints[frame_index],
+                        source_global_rot_mats=clip.global_rot_mats[frame_index]
+                        if clip.global_rot_mats is not None
+                        else None,
+                        gltf=gltf,
+                        joint_by_name=joint_by_name,
+                        calibrations=leg_calibrations,
+                        body_relative=options.body_relative_leg_ik,
+                        leg_guide=leg_guides[frame_index] if leg_guides is not None else None,
+                    )
+            quats_by_frame.append(local_quats)
+        return quats_by_frame
 
-    pre_postprocess: dict[str, Any] = {"foot_orientation_lock": {"enabled": False}}
+    local_quats_by_frame = build_local_quats_by_frame()
+
+    pre_postprocess: dict[str, Any] = {
+        "airborne_leg_stabilization": {"enabled": False},
+        "foot_orientation_lock": {"enabled": False},
+    }
+    if options.airborne_leg_stabilization and leg_ik_enabled:
+        rough_frames = _build_frame_geometries(
+            gltf=gltf,
+            skin=skin,
+            local_quats_by_frame=local_quats_by_frame,
+            normalizer=normalizer,
+            clip=clip,
+            options=options,
+        )
+        leg_guides, air_report = _airborne_leg_guides(
+            clip=clip,
+            rough_frames=rough_frames,
+            joint_by_name=joint_by_name,
+            options=options,
+        )
+        pre_postprocess["airborne_leg_stabilization"] = air_report
+        if air_report.get("guided_frames", 0) > 0:
+            local_quats_by_frame = build_local_quats_by_frame(leg_guides)
+
     if options.foot_contact_lock and options.foot_orientation_lock:
         rough_frames = _build_frame_geometries(
             gltf=gltf,
@@ -1199,8 +1515,13 @@ def retarget_motion_to_avatar(
         "source_skeleton": "SMPL-22/Kimodo local rotations retargeted to avatar skin joints",
         "leg_ik": {
             "enabled": leg_ik_enabled,
-            "strategy": "calibrated two-bone IK with target-rig knee pole constraints",
+            "strategy": (
+                "body-relative calibrated two-bone IK with target-rig knee pole constraints"
+                if options.body_relative_leg_ik
+                else "calibrated two-bone IK with target-rig knee pole constraints"
+            ),
             "legs": [calibration.side for calibration in leg_calibrations],
+            "body_relative": options.body_relative_leg_ik,
         },
         "postprocess": postprocess,
     }
@@ -1218,6 +1539,7 @@ def retarget_motion_to_avatar(
         "retarget_strategy": (
             "map SMPL-22/GEM/Kimodo local rotations to compatible ViCo/Mixamo skin joints; "
             "when posed joints are available, solve calibrated two-bone leg IK using the target rig knee pole; "
+            "body-relative leg mapping and airborne leg stabilization are experimental opt-in modes; "
             "optionally stabilize root yaw and lock support feet during contact/landing"
         ),
         "selection": selection or {},

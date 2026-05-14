@@ -60,7 +60,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--foot-contact-height", type=float, default=0.12)
     parser.add_argument("--foot-lock-blend-frames", type=int, default=4)
+    parser.add_argument(
+        "--airborne-leg-stabilization",
+        action="store_true",
+        help="Experimental: stabilize airborne acrobatic leg motion in pelvis-local space before leg IK.",
+    )
+    parser.add_argument("--airborne-leg-stabilization-strength", type=float, default=0.85)
+    parser.add_argument("--airborne-tuck-reach-ratio", type=float, default=0.52)
     parser.add_argument("--no-calibrated-leg-ik", action="store_true")
+    parser.add_argument(
+        "--body-relative-leg-ik",
+        action="store_true",
+        help="Experimental: map Kimodo leg directions through pelvis-local frames before leg IK.",
+    )
     parser.add_argument("--no-solidify-shell", action="store_true")
     parser.add_argument("--body-shell-thickness", type=float, default=0.018)
     parser.add_argument("--hair-shell-thickness", type=float, default=0.006)
@@ -105,7 +117,11 @@ def main() -> None:
             foot_orientation_lock=not args.no_foot_orientation_lock,
             foot_contact_height=args.foot_contact_height,
             foot_lock_blend_frames=args.foot_lock_blend_frames,
+            airborne_leg_stabilization=args.airborne_leg_stabilization,
+            airborne_leg_stabilization_strength=args.airborne_leg_stabilization_strength,
+            airborne_tuck_reach_ratio=args.airborne_tuck_reach_ratio,
             calibrated_leg_ik=not args.no_calibrated_leg_ik,
+            body_relative_leg_ik=args.body_relative_leg_ik,
             prefer_joint_position_ik=args.joint_ik,
             solidify_shell=not args.no_solidify_shell,
             body_shell_thickness=args.body_shell_thickness,

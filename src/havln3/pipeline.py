@@ -47,7 +47,11 @@ class AvatarActionRequest:
     foot_orientation_lock: bool = True
     foot_contact_height: float = 0.12
     foot_lock_blend_frames: int = 4
+    airborne_leg_stabilization: bool = False
+    airborne_leg_stabilization_strength: float = 0.85
+    airborne_tuck_reach_ratio: float = 0.52
     calibrated_leg_ik: bool = True
+    body_relative_leg_ik: bool = False
     prefer_joint_position_ik: bool = False
     solidify_shell: bool = True
     body_shell_thickness: float = 0.018
@@ -97,7 +101,11 @@ class AvatarActionPipeline:
             foot_orientation_lock=request.foot_orientation_lock,
             foot_contact_height=request.foot_contact_height,
             foot_lock_blend_frames=request.foot_lock_blend_frames,
+            airborne_leg_stabilization=request.airborne_leg_stabilization,
+            airborne_leg_stabilization_strength=request.airborne_leg_stabilization_strength,
+            airborne_tuck_reach_ratio=request.airborne_tuck_reach_ratio,
             calibrated_leg_ik=request.calibrated_leg_ik,
+            body_relative_leg_ik=request.body_relative_leg_ik,
             prefer_joint_position_ik=request.prefer_joint_position_ik,
             solidify_shell=request.solidify_shell,
             body_shell_thickness=request.body_shell_thickness,

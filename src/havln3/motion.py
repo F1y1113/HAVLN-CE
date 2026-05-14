@@ -46,6 +46,7 @@ class MotionClip:
     source_path: Path
     prompt: str | None = None
     fps: float | None = None
+    global_rot_mats: np.ndarray | None = None
 
     @property
     def frames(self) -> int:
@@ -108,6 +109,7 @@ def load_motion_file(
             foot_contacts=data["foot_contacts"].astype(bool) if "foot_contacts" in data else None,
             source_path=motion_path,
             fps=fps,
+            global_rot_mats=data["global_rot_mats"].astype(np.float64) if "global_rot_mats" in data else None,
         )
 
     if "root_orient" in data and "pose_body" in data:
@@ -118,6 +120,7 @@ def load_motion_file(
             foot_contacts=data["foot_contacts"].astype(bool) if "foot_contacts" in data else None,
             source_path=motion_path,
             fps=float(data["mocap_frame_rate"]) if "mocap_frame_rate" in data else None,
+            global_rot_mats=None,
         )
 
     if amass_path:
@@ -165,6 +168,9 @@ def resample_motion(clip: MotionClip, target_frames: int) -> MotionClip:
         source_path=clip.source_path,
         prompt=clip.prompt,
         fps=clip.fps,
+        global_rot_mats=_resample_rotations(clip.global_rot_mats, target_frames)
+        if clip.global_rot_mats is not None
+        else None,
     )
 
 
