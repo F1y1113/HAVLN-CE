@@ -98,6 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--airborne-leg-stabilization-strength", type=float, default=0.85)
     parser.add_argument("--airborne-tuck-reach-ratio", type=float, default=0.52)
     parser.add_argument("--no-calibrated-leg-ik", action="store_true")
+    parser.add_argument("--no-calibrated-arm-ik", action="store_true")
     parser.add_argument(
         "--body-relative-leg-ik",
         action="store_true",
@@ -192,6 +193,7 @@ def main() -> None:
             airborne_leg_stabilization_strength=args.airborne_leg_stabilization_strength,
             airborne_tuck_reach_ratio=args.airborne_tuck_reach_ratio,
             calibrated_leg_ik=not args.no_calibrated_leg_ik,
+            calibrated_arm_ik=not args.no_calibrated_arm_ik,
             body_relative_leg_ik=args.body_relative_leg_ik,
             prefer_joint_position_ik=args.joint_ik,
             procedural_running_arm_swing=(

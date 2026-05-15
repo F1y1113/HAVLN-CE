@@ -58,6 +58,11 @@ SMPL_LEG_JOINTS = {
     "Right": {"hip": 2, "knee": 5, "ankle": 8, "toe": 11},
 }
 
+SMPL_ARM_JOINTS = {
+    "Left": {"shoulder": 16, "elbow": 18, "wrist": 20},
+    "Right": {"shoulder": 17, "elbow": 19, "wrist": 21},
+}
+
 GLTF_UP = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 SOURCE_TO_AVATAR_AXES = np.array(
     [
@@ -103,6 +108,7 @@ class RetargetOptions:
     material_roughness: float = 0.88
     detect_texture_alpha: bool = True
     calibrated_leg_ik: bool = True
+    calibrated_arm_ik: bool = True
     body_relative_leg_ik: bool = False
     prefer_joint_position_ik: bool = False
     procedural_running_arm_swing: bool = False
@@ -658,6 +664,103 @@ def _apply_calibrated_leg_ik(
                 )
                 foot_delta = local_rest_rot[calibration.ankle].inv() * knee_global_rot.inv() * desired_foot_rot
                 local[calibration.ankle] = foot_delta.as_quat()
+
+    return local
+
+
+def _apply_calibrated_arm_ik(
+    *,
+    local: np.ndarray,
+    source_joints: np.ndarray,
+    gltf: GLTF2,
+    joint_by_name: dict[str, int],
+    calibrations: list[ArmCalibration],
+) -> np.ndarray:
+    if not calibrations:
+        return local
+
+    skin = gltf.skins[0]
+    source = _source_to_avatar_axes(source_joints.astype(np.float64))
+    current_globals = node_global_matrices(gltf, local)
+    source_basis = _source_body_basis(source)
+    target_basis = _target_body_basis_from_globals(current_globals, skin, joint_by_name)
+    local_rest_rot = {
+        skin_index: _local_rest_rotation(gltf, node_index)
+        for skin_index, node_index in enumerate(skin.joints)
+    }
+
+    for calibration in calibrations:
+        source_map = SMPL_ARM_JOINTS[calibration.side]
+        source_shoulder = source[source_map["shoulder"]]
+        source_elbow = source[source_map["elbow"]]
+        source_wrist = source[source_map["wrist"]]
+
+        source_upper_len = float(np.linalg.norm(source_elbow - source_shoulder))
+        source_lower_len = float(np.linalg.norm(source_wrist - source_elbow))
+        source_chain_len = source_upper_len + source_lower_len
+        if source_chain_len < 1e-8:
+            continue
+
+        source_direction = _source_body_relative_direction(
+            source_wrist - source_shoulder,
+            source_body_basis=source_basis,
+            target_body_basis=target_basis,
+        )
+        if source_direction is None:
+            continue
+        reach_ratio = float(np.linalg.norm(source_wrist - source_shoulder) / source_chain_len)
+        reach_ratio = float(np.clip(reach_ratio, 0.20, 0.985))
+
+        parent_rot = (
+            _rotation_from_matrix(current_globals[calibration.parent_node])
+            if calibration.parent_node is not None
+            else Rotation.identity()
+        )
+        source_pole = _limb_pole(source_shoulder, source_elbow, source_wrist)
+        pole = None
+        if source_basis is not None and target_basis is not None:
+            pole = _projected_unit(target_basis @ (source_basis.T @ source_pole), source_direction)
+        if pole is None:
+            pole = _projected_unit(source_pole, source_direction)
+        if pole is None:
+            pole = parent_rot.apply(calibration.rest_pole_parent_local)
+            pole = _projected_unit(pole, source_direction)
+        if pole is None:
+            pole = _fallback_pole(source_direction)
+
+        shoulder_pos = current_globals[skin.joints[calibration.upper]][:3, 3]
+        elbow_pos, wrist_pos = _two_bone_knee_position(
+            shoulder_pos,
+            source_direction,
+            pole,
+            upper_len=calibration.upper_len,
+            lower_len=calibration.lower_len,
+            reach_ratio=reach_ratio,
+        )
+
+        desired_upper_rot = _basis_rotation(
+            calibration.rest_upper_local,
+            calibration.rest_pole_upper_local,
+            elbow_pos - shoulder_pos,
+            pole,
+        )
+        upper_delta = local_rest_rot[calibration.upper].inv() * parent_rot.inv() * desired_upper_rot
+        local[calibration.upper] = upper_delta.as_quat()
+
+        upper_global_rot = parent_rot * local_rest_rot[calibration.upper] * upper_delta
+        desired_forearm_rot = _basis_rotation(
+            calibration.rest_lower_local,
+            calibration.rest_pole_forearm_local,
+            wrist_pos - elbow_pos,
+            pole,
+        )
+        forearm_delta = (
+            local_rest_rot[calibration.forearm].inv()
+            * upper_global_rot.inv()
+            * desired_forearm_rot
+        )
+        local[calibration.forearm] = forearm_delta.as_quat()
+        local[calibration.hand] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
 
     return local
 
@@ -2404,6 +2507,7 @@ def retarget_motion_to_avatar(
     leg_calibrations = _leg_calibrations(gltf, joint_by_name, rest_globals)
     arm_calibrations = _arm_calibrations(gltf, joint_by_name, rest_globals)
     leg_ik_enabled = options.calibrated_leg_ik and clip.posed_joints is not None and bool(leg_calibrations)
+    arm_ik_enabled = options.calibrated_arm_ik and clip.posed_joints is not None and bool(arm_calibrations)
 
     rest_vertices = deform_skinned_primitives(gltf, rest_joint_deltas)
     normalizer = VertexNormalizer.from_vertices(
@@ -2438,6 +2542,14 @@ def retarget_motion_to_avatar(
                         body_relative=options.body_relative_leg_ik,
                         leg_guide=leg_guides[frame_index] if leg_guides is not None else None,
                     )
+                if arm_ik_enabled:
+                    local_quats = _apply_calibrated_arm_ik(
+                        local=local_quats,
+                        source_joints=clip.posed_joints[frame_index],
+                        gltf=gltf,
+                        joint_by_name=joint_by_name,
+                        calibrations=arm_calibrations,
+                    )
             quats_by_frame.append(local_quats)
         return quats_by_frame
 
@@ -2445,6 +2557,7 @@ def retarget_motion_to_avatar(
 
     pre_postprocess: dict[str, Any] = {
         "airborne_leg_stabilization": {"enabled": False},
+        "calibrated_arm_ik": {"enabled": arm_ik_enabled},
         "torso_counter_rotation": {"enabled": False},
         "running_arm_swing": {"enabled": False},
         "foot_orientation_lock": {"enabled": False},
@@ -2588,6 +2701,11 @@ def retarget_motion_to_avatar(
             "legs": [calibration.side for calibration in leg_calibrations],
             "body_relative": options.body_relative_leg_ik,
         },
+        "arm_ik": {
+            "enabled": arm_ik_enabled,
+            "strategy": "calibrated two-bone IK from SMPL posed shoulder/elbow/wrist positions",
+            "arms": [calibration.side for calibration in arm_calibrations],
+        },
         "postprocess": postprocess,
     }
     (output_dir / "skeleton.json").write_text(json.dumps(skeleton, indent=2), encoding="utf-8")
@@ -2603,7 +2721,7 @@ def retarget_motion_to_avatar(
         "appearance_strategy": "preserve original ViCo/Mixamo skinned GLB mesh, UVs, skin weights, and textures",
         "retarget_strategy": (
             "map SMPL-22/GEM/Kimodo local rotations to compatible ViCo/Mixamo skin joints; "
-            "when posed joints are available, solve calibrated two-bone leg IK using the target rig knee pole; "
+            "when posed joints are available, solve calibrated two-bone leg and arm IK using target rig poles; "
             "body-relative leg mapping and airborne leg stabilization are experimental opt-in modes; "
             "optionally stabilize root yaw and lock support feet during contact/landing"
         ),
@@ -2638,6 +2756,7 @@ def retarget_motion_to_avatar(
         "max_top_y": max(item["max"][1] for item in bounds),
         "max_height": max(item["max"][1] - item["min"][1] for item in bounds),
         "leg_ik": skeleton["leg_ik"],
+        "arm_ik": skeleton["arm_ik"],
         "postprocess": postprocess,
     }
     return report

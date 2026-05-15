@@ -65,6 +65,7 @@ class AvatarActionRequest:
     airborne_leg_stabilization_strength: float = 0.85
     airborne_tuck_reach_ratio: float = 0.52
     calibrated_leg_ik: bool = True
+    calibrated_arm_ik: bool = True
     body_relative_leg_ik: bool = False
     prefer_joint_position_ik: bool = False
     procedural_running_arm_swing: bool = False
@@ -139,6 +140,7 @@ class AvatarActionPipeline:
             airborne_leg_stabilization_strength=request.airborne_leg_stabilization_strength,
             airborne_tuck_reach_ratio=request.airborne_tuck_reach_ratio,
             calibrated_leg_ik=request.calibrated_leg_ik,
+            calibrated_arm_ik=request.calibrated_arm_ik,
             body_relative_leg_ik=request.body_relative_leg_ik,
             prefer_joint_position_ik=request.prefer_joint_position_ik,
             procedural_running_arm_swing=request.procedural_running_arm_swing,
