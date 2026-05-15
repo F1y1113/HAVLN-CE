@@ -701,11 +701,13 @@ def _apply_calibrated_arm_ik(
         if source_chain_len < 1e-8:
             continue
 
-        source_direction = _source_body_relative_direction(
-            source_wrist - source_shoulder,
-            source_body_basis=source_basis,
-            target_body_basis=target_basis,
-        )
+        source_direction = None
+        if source_basis is not None and target_basis is not None:
+            local_direction = source_basis.T @ (source_wrist - source_shoulder)
+            local_direction[2] *= -1.0
+            source_direction = _safe_unit(target_basis @ local_direction)
+        if source_direction is None:
+            source_direction = _safe_unit(source_wrist - source_shoulder)
         if source_direction is None:
             continue
         reach_ratio = float(np.linalg.norm(source_wrist - source_shoulder) / source_chain_len)
@@ -719,7 +721,9 @@ def _apply_calibrated_arm_ik(
         source_pole = _limb_pole(source_shoulder, source_elbow, source_wrist)
         pole = None
         if source_basis is not None and target_basis is not None:
-            pole = _projected_unit(target_basis @ (source_basis.T @ source_pole), source_direction)
+            local_pole = source_basis.T @ source_pole
+            local_pole[2] *= -1.0
+            pole = _projected_unit(target_basis @ local_pole, source_direction)
         if pole is None:
             pole = _projected_unit(source_pole, source_direction)
         if pole is None:
