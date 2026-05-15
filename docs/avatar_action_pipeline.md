@@ -148,6 +148,12 @@ source upper-body motion. Tune `--running-arm-swing-strength`,
 it with `--no-procedural-running-arms` when evaluating raw Kimodo upper-body
 motion.
 
+The same locomotion pass can add a small spine/chest counter-rotation before
+arm cleanup. It is intentionally conservative, driven by the same left/right leg
+phase, and leaves root, pelvis, and legs untouched. Tune
+`--torso-counter-rotation-degrees` and `--torso-counter-rotation-strength`, or
+disable it with `--no-torso-counter-rotation` for baseline retarget checks.
+
 ## Habitat Material And Thickness
 
 By default each exported frame:

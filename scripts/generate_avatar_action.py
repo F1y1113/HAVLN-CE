@@ -122,6 +122,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--running-arm-side-ratio", type=float, default=0.055)
     parser.add_argument("--running-arm-reach-min", type=float, default=0.46)
     parser.add_argument("--running-arm-reach-max", type=float, default=0.68)
+    parser.add_argument(
+        "--no-torso-counter-rotation",
+        action="store_true",
+        help="Disable the locomotion-specific spine/chest counter-rotation cleanup layer.",
+    )
+    parser.add_argument("--torso-counter-rotation-degrees", type=float, default=7.0)
+    parser.add_argument("--torso-counter-rotation-strength", type=float, default=0.45)
     return parser.parse_args()
 
 
@@ -184,6 +191,9 @@ def main() -> None:
             running_arm_side_ratio=args.running_arm_side_ratio,
             running_arm_reach_min=args.running_arm_reach_min,
             running_arm_reach_max=args.running_arm_reach_max,
+            locomotion_torso_counter_rotation=not args.no_torso_counter_rotation,
+            torso_counter_rotation_degrees=args.torso_counter_rotation_degrees,
+            torso_counter_rotation_strength=args.torso_counter_rotation_strength,
             solidify_shell=not args.no_solidify_shell,
             body_shell_thickness=args.body_shell_thickness,
             hair_shell_thickness=args.hair_shell_thickness,

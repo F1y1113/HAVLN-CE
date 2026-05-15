@@ -112,6 +112,9 @@ class RetargetOptions:
     running_arm_side_ratio: float = 0.055
     running_arm_reach_min: float = 0.46
     running_arm_reach_max: float = 0.68
+    locomotion_torso_counter_rotation: bool = True
+    torso_counter_rotation_degrees: float = 7.0
+    torso_counter_rotation_strength: float = 0.45
     solidify_shell: bool = True
     body_shell_thickness: float = 0.018
     hair_shell_thickness: float = 0.006
@@ -1599,6 +1602,74 @@ def _apply_procedural_running_arm_swing(
     }
 
 
+def _apply_locomotion_torso_counter_rotation(
+    *,
+    local_quats_by_frame: list[np.ndarray],
+    gltf: GLTF2,
+    joint_by_name: dict[str, int],
+    clip: MotionClip,
+    prompt: str,
+    options: RetargetOptions,
+) -> dict[str, Any]:
+    if not options.locomotion_torso_counter_rotation:
+        return {"enabled": False, "reason": "disabled"}
+    if not _prompt_requests_running_arm_swing(prompt):
+        return {"enabled": False, "reason": "prompt is not locomotion-like"}
+    frame_count = len(local_quats_by_frame)
+    if frame_count == 0:
+        return {"enabled": True, "frames_adjusted": 0, "reason": "empty clip"}
+
+    skin = gltf.skins[0]
+    local_rest_rot = {
+        skin_index: _local_rest_rotation(gltf, node_index)
+        for skin_index, node_index in enumerate(skin.joints)
+    }
+    phase_signal, phase_report = _source_leg_phase_signal(clip, frame_count)
+    max_angle = np.radians(float(max(options.torso_counter_rotation_degrees, 0.0)))
+    strength = float(np.clip(options.torso_counter_rotation_strength, 0.0, 1.0))
+    channels = (
+        ("Spine", -0.20),
+        ("Spine1", -0.30),
+        ("Spine2", -0.38),
+        ("LeftShoulder", -0.16),
+        ("RightShoulder", -0.16),
+    )
+    applied_channels = 0
+    adjusted_frames: set[int] = set()
+
+    for frame_index, local in enumerate(local_quats_by_frame):
+        phase = float(np.clip(phase_signal[frame_index], -1.0, 1.0))
+        if abs(phase) < 1e-5:
+            continue
+        for name, weight in channels:
+            skin_index = joint_by_name.get(name)
+            if skin_index is None or skin_index not in local_rest_rot:
+                continue
+            local_up = local_rest_rot[skin_index].inv().apply(GLTF_UP)
+            local_up_unit = _safe_unit(local_up)
+            if local_up_unit is None:
+                continue
+            angle = phase * max_angle * strength * weight
+            offset = Rotation.from_rotvec(local_up_unit * angle)
+            current = Rotation.from_quat(local[skin_index])
+            local[skin_index] = (offset * current).as_quat()
+            applied_channels += 1
+            adjusted_frames.add(frame_index)
+
+    return {
+        "enabled": True,
+        "frames_adjusted": len(adjusted_frames),
+        "channels_adjusted": applied_channels,
+        "strength": strength,
+        "max_degrees": float(options.torso_counter_rotation_degrees),
+        "phase": phase_report,
+        "strategy": (
+            "add a small leg-phase-driven counter-yaw to spine/chest/shoulders before arm cleanup, "
+            "leaving root, pelvis, and legs untouched"
+        ),
+    }
+
+
 def _apply_foot_contact_lock(
     frames: list[FrameGeometry],
     joint_by_name: dict[str, int],
@@ -2374,6 +2445,7 @@ def retarget_motion_to_avatar(
 
     pre_postprocess: dict[str, Any] = {
         "airborne_leg_stabilization": {"enabled": False},
+        "torso_counter_rotation": {"enabled": False},
         "running_arm_swing": {"enabled": False},
         "foot_orientation_lock": {"enabled": False},
         "grounded_foot_ik": {"enabled": False},
@@ -2396,6 +2468,15 @@ def retarget_motion_to_avatar(
         pre_postprocess["airborne_leg_stabilization"] = air_report
         if air_report.get("guided_frames", 0) > 0:
             local_quats_by_frame = build_local_quats_by_frame(leg_guides)
+
+    pre_postprocess["torso_counter_rotation"] = _apply_locomotion_torso_counter_rotation(
+        local_quats_by_frame=local_quats_by_frame,
+        gltf=gltf,
+        joint_by_name=joint_by_name,
+        clip=clip,
+        prompt=prompt,
+        options=options,
+    )
 
     pre_postprocess["running_arm_swing"] = _apply_procedural_running_arm_swing(
         local_quats_by_frame=local_quats_by_frame,

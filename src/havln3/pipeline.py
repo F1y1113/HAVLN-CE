@@ -74,6 +74,9 @@ class AvatarActionRequest:
     running_arm_side_ratio: float = 0.055
     running_arm_reach_min: float = 0.46
     running_arm_reach_max: float = 0.68
+    locomotion_torso_counter_rotation: bool = True
+    torso_counter_rotation_degrees: float = 7.0
+    torso_counter_rotation_strength: float = 0.45
     solidify_shell: bool = True
     body_shell_thickness: float = 0.018
     hair_shell_thickness: float = 0.006
@@ -145,6 +148,9 @@ class AvatarActionPipeline:
             running_arm_side_ratio=request.running_arm_side_ratio,
             running_arm_reach_min=request.running_arm_reach_min,
             running_arm_reach_max=request.running_arm_reach_max,
+            locomotion_torso_counter_rotation=request.locomotion_torso_counter_rotation,
+            torso_counter_rotation_degrees=request.torso_counter_rotation_degrees,
+            torso_counter_rotation_strength=request.torso_counter_rotation_strength,
             solidify_shell=request.solidify_shell,
             body_shell_thickness=request.body_shell_thickness,
             hair_shell_thickness=request.hair_shell_thickness,
