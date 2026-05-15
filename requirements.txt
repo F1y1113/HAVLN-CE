@@ -9,6 +9,11 @@ lmdb
 msgpack_numpy
 networkx
 numpy>=1.16.1
+scipy>=1.12
+jsonschema>=4.21
+trimesh>=4.0
+pygltflib>=1.16
+pillow>=10
 pre-commit
 torch>=1.6.0
 tqdm>=4.0.0
