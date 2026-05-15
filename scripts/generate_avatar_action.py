@@ -112,9 +112,14 @@ def parse_args() -> argparse.Namespace:
         help="Experimental: retarget from Kimodo posed_joints by bone-direction IK.",
     )
     parser.add_argument(
+        "--procedural-running-arms",
+        action="store_true",
+        help="Enable the locomotion-specific target-rig arm swing cleanup layer.",
+    )
+    parser.add_argument(
         "--no-procedural-running-arms",
         action="store_true",
-        help="Disable the locomotion-specific target-rig arm swing cleanup layer.",
+        help="Keep the locomotion-specific target-rig arm swing cleanup layer disabled.",
     )
     parser.add_argument("--running-arm-swing-strength", type=float, default=0.35)
     parser.add_argument("--running-arm-forward-ratio", type=float, default=0.52)
@@ -123,9 +128,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--running-arm-reach-min", type=float, default=0.46)
     parser.add_argument("--running-arm-reach-max", type=float, default=0.68)
     parser.add_argument(
+        "--torso-counter-rotation",
+        action="store_true",
+        help="Enable the locomotion-specific spine/chest counter-rotation cleanup layer.",
+    )
+    parser.add_argument(
         "--no-torso-counter-rotation",
         action="store_true",
-        help="Disable the locomotion-specific spine/chest counter-rotation cleanup layer.",
+        help="Keep the locomotion-specific spine/chest counter-rotation cleanup layer disabled.",
     )
     parser.add_argument("--torso-counter-rotation-degrees", type=float, default=7.0)
     parser.add_argument("--torso-counter-rotation-strength", type=float, default=0.45)
@@ -184,14 +194,18 @@ def main() -> None:
             calibrated_leg_ik=not args.no_calibrated_leg_ik,
             body_relative_leg_ik=args.body_relative_leg_ik,
             prefer_joint_position_ik=args.joint_ik,
-            procedural_running_arm_swing=not args.no_procedural_running_arms,
+            procedural_running_arm_swing=(
+                args.procedural_running_arms and not args.no_procedural_running_arms
+            ),
             running_arm_swing_strength=args.running_arm_swing_strength,
             running_arm_forward_ratio=args.running_arm_forward_ratio,
             running_arm_drop_ratio=args.running_arm_drop_ratio,
             running_arm_side_ratio=args.running_arm_side_ratio,
             running_arm_reach_min=args.running_arm_reach_min,
             running_arm_reach_max=args.running_arm_reach_max,
-            locomotion_torso_counter_rotation=not args.no_torso_counter_rotation,
+            locomotion_torso_counter_rotation=(
+                args.torso_counter_rotation and not args.no_torso_counter_rotation
+            ),
             torso_counter_rotation_degrees=args.torso_counter_rotation_degrees,
             torso_counter_rotation_strength=args.torso_counter_rotation_strength,
             solidify_shell=not args.no_solidify_shell,

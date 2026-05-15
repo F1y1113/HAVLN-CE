@@ -137,22 +137,22 @@ Treat this as a small cleanup pass; a source with no natural arm swing should be
 rejected by the quality gate and regenerated with a stronger prompt.
 
 For locomotion prompts such as walking, jogging, running, or small-circle
-movement, the retargeter also enables a target-rig procedural arm swing layer by
-default. It reads the Kimodo left/right ankle forward phase, drives opposite
-arm swing from that phase, and solves the target avatar's shoulder-elbow-hand
-chain with two-bone IK in the current chest/body basis. The default strength is
-kept low so this layer corrects shoulder-axis mismatch without replacing the
-source upper-body motion. Tune `--running-arm-swing-strength`,
-`--running-arm-forward-ratio`, `--running-arm-drop-ratio`,
-`--running-arm-side-ratio`, and the arm reach bounds for fast A/B tests; disable
-it with `--no-procedural-running-arms` when evaluating raw Kimodo upper-body
-motion.
+movement, keep the default path as raw retarget plus lower-body grounding first.
+The target-rig procedural arm swing layer is opt-in with
+`--procedural-running-arms`. It reads the Kimodo left/right ankle forward phase,
+drives opposite arm swing from that phase, and solves the target avatar's
+shoulder-elbow-hand chain with two-bone IK in the current chest/body basis.
+Tune `--running-arm-swing-strength`, `--running-arm-forward-ratio`,
+`--running-arm-drop-ratio`, `--running-arm-side-ratio`, and the arm reach bounds
+only after the source motion passes the upper-body quality gate. Use
+`--no-procedural-running-arms` to force the diagnostic baseline.
 
-The same locomotion pass can add a small spine/chest counter-rotation before
-arm cleanup. It is intentionally conservative, driven by the same left/right leg
-phase, and leaves root, pelvis, and legs untouched. Tune
-`--torso-counter-rotation-degrees` and `--torso-counter-rotation-strength`, or
-disable it with `--no-torso-counter-rotation` for baseline retarget checks.
+The same locomotion pass can add a small spine/chest counter-rotation, but this
+is also opt-in with `--torso-counter-rotation`. Keep it off while debugging foot
+contact and arm phase, because torso, arm, and foot corrections can otherwise
+fight over heading and gait timing. Tune `--torso-counter-rotation-degrees` and
+`--torso-counter-rotation-strength` only in isolated A/B tests; use
+`--no-torso-counter-rotation` to force the diagnostic baseline.
 
 ## Habitat Material And Thickness
 

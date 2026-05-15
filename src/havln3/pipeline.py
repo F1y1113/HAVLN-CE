@@ -67,14 +67,14 @@ class AvatarActionRequest:
     calibrated_leg_ik: bool = True
     body_relative_leg_ik: bool = False
     prefer_joint_position_ik: bool = False
-    procedural_running_arm_swing: bool = True
+    procedural_running_arm_swing: bool = False
     running_arm_swing_strength: float = 0.35
     running_arm_forward_ratio: float = 0.52
     running_arm_drop_ratio: float = 0.50
     running_arm_side_ratio: float = 0.055
     running_arm_reach_min: float = 0.46
     running_arm_reach_max: float = 0.68
-    locomotion_torso_counter_rotation: bool = True
+    locomotion_torso_counter_rotation: bool = False
     torso_counter_rotation_degrees: float = 7.0
     torso_counter_rotation_strength: float = 0.45
     solidify_shell: bool = True
