@@ -68,7 +68,12 @@ class AvatarActionRequest:
     body_relative_leg_ik: bool = False
     prefer_joint_position_ik: bool = False
     procedural_running_arm_swing: bool = True
-    running_arm_swing_strength: float = 0.88
+    running_arm_swing_strength: float = 0.35
+    running_arm_forward_ratio: float = 0.52
+    running_arm_drop_ratio: float = 0.50
+    running_arm_side_ratio: float = 0.055
+    running_arm_reach_min: float = 0.46
+    running_arm_reach_max: float = 0.68
     solidify_shell: bool = True
     body_shell_thickness: float = 0.018
     hair_shell_thickness: float = 0.006
@@ -135,6 +140,11 @@ class AvatarActionPipeline:
             prefer_joint_position_ik=request.prefer_joint_position_ik,
             procedural_running_arm_swing=request.procedural_running_arm_swing,
             running_arm_swing_strength=request.running_arm_swing_strength,
+            running_arm_forward_ratio=request.running_arm_forward_ratio,
+            running_arm_drop_ratio=request.running_arm_drop_ratio,
+            running_arm_side_ratio=request.running_arm_side_ratio,
+            running_arm_reach_min=request.running_arm_reach_min,
+            running_arm_reach_max=request.running_arm_reach_max,
             solidify_shell=request.solidify_shell,
             body_shell_thickness=request.body_shell_thickness,
             hair_shell_thickness=request.hair_shell_thickness,

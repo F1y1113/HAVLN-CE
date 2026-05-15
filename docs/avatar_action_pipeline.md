@@ -140,10 +140,13 @@ For locomotion prompts such as walking, jogging, running, or small-circle
 movement, the retargeter also enables a target-rig procedural arm swing layer by
 default. It reads the Kimodo left/right ankle forward phase, drives opposite
 arm swing from that phase, and solves the target avatar's shoulder-elbow-hand
-chain with two-bone IK so the hands stay close to the torso. This layer fixes
-source/target shoulder-axis mismatch after a good Kimodo sample has been
-selected; disable it with `--no-procedural-running-arms` when evaluating raw
-Kimodo upper-body motion.
+chain with two-bone IK in the current chest/body basis. The default strength is
+kept low so this layer corrects shoulder-axis mismatch without replacing the
+source upper-body motion. Tune `--running-arm-swing-strength`,
+`--running-arm-forward-ratio`, `--running-arm-drop-ratio`,
+`--running-arm-side-ratio`, and the arm reach bounds for fast A/B tests; disable
+it with `--no-procedural-running-arms` when evaluating raw Kimodo upper-body
+motion.
 
 ## Habitat Material And Thickness
 

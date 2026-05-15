@@ -106,7 +106,12 @@ class RetargetOptions:
     body_relative_leg_ik: bool = False
     prefer_joint_position_ik: bool = False
     procedural_running_arm_swing: bool = True
-    running_arm_swing_strength: float = 0.88
+    running_arm_swing_strength: float = 0.35
+    running_arm_forward_ratio: float = 0.52
+    running_arm_drop_ratio: float = 0.50
+    running_arm_side_ratio: float = 0.055
+    running_arm_reach_min: float = 0.46
+    running_arm_reach_max: float = 0.68
     solidify_shell: bool = True
     body_shell_thickness: float = 0.018
     hair_shell_thickness: float = 0.006
@@ -1492,11 +1497,14 @@ def _apply_procedural_running_arm_swing(
             swing = float(np.clip(swing, -1.0, 1.0))
             shoulder = globals_[skin.joints[calibration.upper]][:3, 3]
             chain_len = calibration.upper_len + calibration.lower_len
+            forward_ratio = float(max(options.running_arm_forward_ratio, 0.0))
+            drop_ratio = float(max(options.running_arm_drop_ratio, 0.0))
+            side_ratio = float(max(options.running_arm_side_ratio, 0.0))
             hand_target = (
                 shoulder
-                + side_axis * side_sign * (0.11 * chain_len)
-                - up_axis * (0.72 * chain_len)
-                + forward_axis * (0.32 * chain_len * swing)
+                + side_axis * side_sign * (side_ratio * chain_len)
+                - up_axis * (drop_ratio * chain_len)
+                + forward_axis * (forward_ratio * chain_len * swing)
             )
             direction = _safe_unit(hand_target - shoulder)
             if direction is None:
@@ -1508,8 +1516,8 @@ def _apply_procedural_running_arm_swing(
             reach_ratio = float(
                 np.clip(
                     np.linalg.norm(hand_target - shoulder) / max(chain_len, 1e-8),
-                    0.56,
-                    0.86,
+                    options.running_arm_reach_min,
+                    options.running_arm_reach_max,
                 )
             )
             elbow, wrist = _two_bone_knee_position(
@@ -1576,6 +1584,13 @@ def _apply_procedural_running_arm_swing(
         "frames_adjusted": len(adjusted_frames),
         "channels_adjusted": adjusted_channels,
         "strength": strength,
+        "target": {
+            "forward_ratio": float(options.running_arm_forward_ratio),
+            "drop_ratio": float(options.running_arm_drop_ratio),
+            "side_ratio": float(options.running_arm_side_ratio),
+            "reach_min": float(options.running_arm_reach_min),
+            "reach_max": float(options.running_arm_reach_max),
+        },
         "phase": phase_report,
         "strategy": (
             "derive a reciprocal arm phase from Kimodo left/right ankle forward offsets, "
