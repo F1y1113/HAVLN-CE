@@ -10,6 +10,7 @@ from havln3.retarget import (
     _expand_support_contact_mask,
     _foot_contact_analysis,
     _max_airborne_gap,
+    _prompt_requests_running_arm_swing,
     _source_body_relative_direction,
 )
 
@@ -196,3 +197,9 @@ def test_body_relative_leg_direction_follows_target_parent_frame() -> None:
     assert mapped is not None
     assert np.allclose(mapped, expected)
     assert not np.allclose(mapped, source_world_leg / np.linalg.norm(source_world_leg))
+
+
+def test_running_arm_swing_prompt_gate_matches_locomotion_only() -> None:
+    assert _prompt_requests_running_arm_swing("A suited person jogs around a small circle")
+    assert _prompt_requests_running_arm_swing("一个人绕小圈慢跑")
+    assert not _prompt_requests_running_arm_swing("A person sits and waves")

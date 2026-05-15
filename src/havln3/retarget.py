@@ -105,6 +105,8 @@ class RetargetOptions:
     calibrated_leg_ik: bool = True
     body_relative_leg_ik: bool = False
     prefer_joint_position_ik: bool = False
+    procedural_running_arm_swing: bool = True
+    running_arm_swing_strength: float = 0.88
     solidify_shell: bool = True
     body_shell_thickness: float = 0.018
     hair_shell_thickness: float = 0.006
@@ -129,6 +131,22 @@ class LegCalibration:
     rest_toe_local: np.ndarray | None
     rest_foot_up_local: np.ndarray | None
     rest_contact_toe_global: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class ArmCalibration:
+    side: str
+    upper: int
+    forearm: int
+    hand: int
+    parent_node: int | None
+    upper_len: float
+    lower_len: float
+    rest_upper_local: np.ndarray
+    rest_lower_local: np.ndarray
+    rest_pole_parent_local: np.ndarray
+    rest_pole_upper_local: np.ndarray
+    rest_pole_forearm_local: np.ndarray
 
 
 @dataclass
@@ -391,6 +409,65 @@ def _leg_calibrations(
                 rest_toe_local=rest_rotations[ankle].inv().apply(rest_toe) if rest_toe is not None else None,
                 rest_foot_up_local=rest_rotations[ankle].inv().apply(GLTF_UP) if toe is not None else None,
                 rest_contact_toe_global=rest_contact_toe,
+            )
+        )
+    return calibrations
+
+
+def _arm_calibrations(
+    gltf: GLTF2,
+    joint_by_name: dict[str, int],
+    rest_globals: list[np.ndarray],
+) -> list[ArmCalibration]:
+    skin = gltf.skins[0]
+    parents = _node_parent_indices(gltf)
+    rest_positions = np.stack([rest_globals[joint][:3, 3] for joint in skin.joints])
+    rest_rotations = {
+        skin_index: _rotation_from_matrix(rest_globals[node_index])
+        for skin_index, node_index in enumerate(skin.joints)
+    }
+    body_basis = _target_body_basis_from_globals(rest_globals, skin, joint_by_name)
+    rest_side = body_basis[:, 0] if body_basis is not None else np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    rest_forward = body_basis[:, 2] if body_basis is not None else np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    calibrations: list[ArmCalibration] = []
+    for side, sign in (("Left", -1.0), ("Right", 1.0)):
+        upper = joint_by_name.get(f"{side}Arm")
+        forearm = joint_by_name.get(f"{side}ForeArm")
+        hand = joint_by_name.get(f"{side}Hand")
+        if upper is None or forearm is None or hand is None:
+            continue
+
+        upper_pos = rest_positions[upper]
+        forearm_pos = rest_positions[forearm]
+        hand_pos = rest_positions[hand]
+        rest_upper = forearm_pos - upper_pos
+        rest_lower = hand_pos - forearm_pos
+        upper_len = float(np.linalg.norm(rest_upper))
+        lower_len = float(np.linalg.norm(rest_lower))
+        if upper_len < 1e-8 or lower_len < 1e-8:
+            continue
+
+        parent_node = parents.get(skin.joints[upper])
+        parent_rot = _rotation_from_matrix(rest_globals[parent_node]) if parent_node is not None else Rotation.identity()
+        pole = _projected_unit(rest_forward, rest_side * sign)
+        if pole is None:
+            pole = _fallback_pole(rest_side * sign)
+
+        calibrations.append(
+            ArmCalibration(
+                side=side,
+                upper=upper,
+                forearm=forearm,
+                hand=hand,
+                parent_node=parent_node,
+                upper_len=upper_len,
+                lower_len=lower_len,
+                rest_upper_local=rest_rotations[upper].inv().apply(rest_upper),
+                rest_lower_local=rest_rotations[forearm].inv().apply(rest_lower),
+                rest_pole_parent_local=parent_rot.inv().apply(pole),
+                rest_pole_upper_local=rest_rotations[upper].inv().apply(pole),
+                rest_pole_forearm_local=rest_rotations[forearm].inv().apply(pole),
             )
         )
     return calibrations
@@ -1292,6 +1369,221 @@ def _airborne_leg_guides(
     }
 
 
+def _prompt_requests_running_arm_swing(prompt: str) -> bool:
+    text = prompt.lower()
+    locomotion_words = (
+        "run",
+        "running",
+        "jog",
+        "jogging",
+        "walk",
+        "walking",
+        "circle",
+        "绕圈",
+        "小圈",
+        "跑",
+        "慢跑",
+        "走",
+    )
+    return any(word in text for word in locomotion_words)
+
+
+def _moving_average(values: np.ndarray, radius: int = 2) -> np.ndarray:
+    if radius <= 0 or len(values) == 0:
+        return values
+    smoothed = values.copy()
+    for index in range(len(values)):
+        start = max(0, index - radius)
+        end = min(len(values), index + radius + 1)
+        smoothed[index] = float(np.mean(values[start:end]))
+    return smoothed
+
+
+def _source_leg_phase_signal(clip: MotionClip, frame_count: int) -> tuple[np.ndarray, dict[str, Any]]:
+    signal = np.zeros(frame_count, dtype=np.float64)
+    valid = np.zeros(frame_count, dtype=bool)
+    if clip.posed_joints is not None:
+        for frame_index in range(min(frame_count, len(clip.posed_joints))):
+            source = _source_to_avatar_axes(clip.posed_joints[frame_index].astype(np.float64))
+            basis = _source_body_basis(source)
+            if basis is None:
+                continue
+            hips = source[0]
+            left_ankle = source[SMPL_LEG_JOINTS["Left"]["ankle"]]
+            right_ankle = source[SMPL_LEG_JOINTS["Right"]["ankle"]]
+            left_local = basis.T @ (left_ankle - hips)
+            right_local = basis.T @ (right_ankle - hips)
+            signal[frame_index] = float(left_local[2] - right_local[2])
+            valid[frame_index] = True
+
+    if valid.any():
+        valid_indices = np.flatnonzero(valid)
+        if len(valid_indices) < frame_count:
+            all_indices = np.arange(frame_count)
+            signal = np.interp(all_indices, valid_indices, signal[valid_indices])
+        signal = signal - float(np.mean(signal))
+        amplitude = float(np.nanpercentile(np.abs(signal), 90.0))
+        source = "posed_joints"
+    else:
+        cycles = max(2.0, frame_count / 36.0)
+        signal = np.sin(np.linspace(0.0, cycles * 2.0 * np.pi, frame_count, endpoint=False))
+        amplitude = 1.0
+        source = "synthetic_cycle"
+
+    if amplitude < 1e-6:
+        cycles = max(2.0, frame_count / 36.0)
+        signal = np.sin(np.linspace(0.0, cycles * 2.0 * np.pi, frame_count, endpoint=False))
+        amplitude = 1.0
+        source = "synthetic_cycle"
+
+    normalized = np.clip(signal / amplitude, -1.0, 1.0)
+    normalized = _moving_average(normalized, radius=2)
+    return normalized, {
+        "source": source,
+        "valid_frames": int(valid.sum()),
+        "amplitude": float(amplitude),
+    }
+
+
+def _apply_procedural_running_arm_swing(
+    *,
+    local_quats_by_frame: list[np.ndarray],
+    gltf: GLTF2,
+    joint_by_name: dict[str, int],
+    calibrations: list[ArmCalibration],
+    clip: MotionClip,
+    prompt: str,
+    options: RetargetOptions,
+) -> dict[str, Any]:
+    if not options.procedural_running_arm_swing:
+        return {"enabled": False, "reason": "disabled"}
+    if not _prompt_requests_running_arm_swing(prompt):
+        return {"enabled": False, "reason": "prompt is not locomotion-like"}
+    if not calibrations:
+        return {"enabled": True, "frames_adjusted": 0, "reason": "missing arm calibration"}
+
+    frame_count = len(local_quats_by_frame)
+    if frame_count == 0:
+        return {"enabled": True, "frames_adjusted": 0, "reason": "empty clip"}
+
+    skin = gltf.skins[0]
+    local_rest_rot = {
+        skin_index: _local_rest_rotation(gltf, node_index)
+        for skin_index, node_index in enumerate(skin.joints)
+    }
+    phase_signal, phase_report = _source_leg_phase_signal(clip, frame_count)
+    strength = float(np.clip(options.running_arm_swing_strength, 0.0, 1.0))
+    adjusted_frames: set[int] = set()
+    adjusted_channels = 0
+
+    for frame_index, local in enumerate(local_quats_by_frame):
+        globals_ = node_global_matrices(gltf, local)
+        body_basis = _target_body_basis_from_globals(globals_, skin, joint_by_name)
+        if body_basis is None:
+            continue
+        side_axis = body_basis[:, 0]
+        up_axis = body_basis[:, 1]
+        forward_axis = body_basis[:, 2]
+
+        for calibration in calibrations:
+            side_sign = -1.0 if calibration.side == "Left" else 1.0
+            # Left arm moves backward when the left leg is forward; right arm mirrors it.
+            swing = (-phase_signal[frame_index] if calibration.side == "Left" else phase_signal[frame_index])
+            swing = float(np.clip(swing, -1.0, 1.0))
+            shoulder = globals_[skin.joints[calibration.upper]][:3, 3]
+            chain_len = calibration.upper_len + calibration.lower_len
+            hand_target = (
+                shoulder
+                + side_axis * side_sign * (0.11 * chain_len)
+                - up_axis * (0.72 * chain_len)
+                + forward_axis * (0.32 * chain_len * swing)
+            )
+            direction = _safe_unit(hand_target - shoulder)
+            if direction is None:
+                continue
+            pole_hint = side_axis * side_sign * 0.85 - up_axis * 0.15
+            pole = _projected_unit(pole_hint, direction)
+            if pole is None:
+                pole = _fallback_pole(direction)
+            reach_ratio = float(
+                np.clip(
+                    np.linalg.norm(hand_target - shoulder) / max(chain_len, 1e-8),
+                    0.56,
+                    0.86,
+                )
+            )
+            elbow, wrist = _two_bone_knee_position(
+                shoulder,
+                direction,
+                pole,
+                upper_len=calibration.upper_len,
+                lower_len=calibration.lower_len,
+                reach_ratio=reach_ratio,
+            )
+
+            parent_rot = (
+                _rotation_from_matrix(globals_[calibration.parent_node])
+                if calibration.parent_node is not None
+                else Rotation.identity()
+            )
+            desired_upper = elbow - shoulder
+            desired_upper_rot = _basis_rotation(
+                calibration.rest_upper_local,
+                calibration.rest_pole_upper_local,
+                desired_upper,
+                pole,
+            )
+            target_upper_delta = (
+                local_rest_rot[calibration.upper].inv()
+                * parent_rot.inv()
+                * desired_upper_rot
+            )
+            current_upper_delta = Rotation.from_quat(local[calibration.upper])
+            upper_delta = _blend_rotation(current_upper_delta, target_upper_delta, strength)
+            local[calibration.upper] = upper_delta.as_quat()
+
+            upper_global_rot = parent_rot * local_rest_rot[calibration.upper] * upper_delta
+            desired_lower = wrist - elbow
+            desired_forearm_rot = _basis_rotation(
+                calibration.rest_lower_local,
+                calibration.rest_pole_forearm_local,
+                desired_lower,
+                pole,
+            )
+            target_forearm_delta = (
+                local_rest_rot[calibration.forearm].inv()
+                * upper_global_rot.inv()
+                * desired_forearm_rot
+            )
+            current_forearm_delta = Rotation.from_quat(local[calibration.forearm])
+            local[calibration.forearm] = _blend_rotation(
+                current_forearm_delta,
+                target_forearm_delta,
+                strength,
+            ).as_quat()
+
+            current_hand_delta = Rotation.from_quat(local[calibration.hand])
+            local[calibration.hand] = _blend_rotation(
+                current_hand_delta,
+                Rotation.identity(),
+                strength * 0.55,
+            ).as_quat()
+            adjusted_channels += 3
+            adjusted_frames.add(frame_index)
+
+    return {
+        "enabled": True,
+        "frames_adjusted": len(adjusted_frames),
+        "channels_adjusted": adjusted_channels,
+        "strength": strength,
+        "phase": phase_report,
+        "strategy": (
+            "derive a reciprocal arm phase from Kimodo left/right ankle forward offsets, "
+            "then solve target-rig two-bone shoulder-elbow-hand IK with hands close to the torso"
+        ),
+    }
+
+
 def _apply_foot_contact_lock(
     frames: list[FrameGeometry],
     joint_by_name: dict[str, int],
@@ -2024,6 +2316,7 @@ def retarget_motion_to_avatar(
     rest_joint_deltas = identity_quaternions(len(skin.joints))
     rest_globals = node_global_matrices(gltf, rest_joint_deltas)
     leg_calibrations = _leg_calibrations(gltf, joint_by_name, rest_globals)
+    arm_calibrations = _arm_calibrations(gltf, joint_by_name, rest_globals)
     leg_ik_enabled = options.calibrated_leg_ik and clip.posed_joints is not None and bool(leg_calibrations)
 
     rest_vertices = deform_skinned_primitives(gltf, rest_joint_deltas)
@@ -2066,6 +2359,7 @@ def retarget_motion_to_avatar(
 
     pre_postprocess: dict[str, Any] = {
         "airborne_leg_stabilization": {"enabled": False},
+        "running_arm_swing": {"enabled": False},
         "foot_orientation_lock": {"enabled": False},
         "grounded_foot_ik": {"enabled": False},
     }
@@ -2087,6 +2381,16 @@ def retarget_motion_to_avatar(
         pre_postprocess["airborne_leg_stabilization"] = air_report
         if air_report.get("guided_frames", 0) > 0:
             local_quats_by_frame = build_local_quats_by_frame(leg_guides)
+
+    pre_postprocess["running_arm_swing"] = _apply_procedural_running_arm_swing(
+        local_quats_by_frame=local_quats_by_frame,
+        gltf=gltf,
+        joint_by_name=joint_by_name,
+        calibrations=arm_calibrations,
+        clip=clip,
+        prompt=prompt,
+        options=options,
+    )
 
     grounded_foot_ik_expected = options.grounded_foot_ik and leg_ik_enabled
     if options.foot_contact_lock and options.foot_orientation_lock and grounded_foot_ik_expected:

@@ -136,6 +136,15 @@ selection, damp the upper-arm, forearm, and hand channels independently with
 Treat this as a small cleanup pass; a source with no natural arm swing should be
 rejected by the quality gate and regenerated with a stronger prompt.
 
+For locomotion prompts such as walking, jogging, running, or small-circle
+movement, the retargeter also enables a target-rig procedural arm swing layer by
+default. It reads the Kimodo left/right ankle forward phase, drives opposite
+arm swing from that phase, and solves the target avatar's shoulder-elbow-hand
+chain with two-bone IK so the hands stay close to the torso. This layer fixes
+source/target shoulder-axis mismatch after a good Kimodo sample has been
+selected; disable it with `--no-procedural-running-arms` when evaluating raw
+Kimodo upper-body motion.
+
 ## Habitat Material And Thickness
 
 By default each exported frame:

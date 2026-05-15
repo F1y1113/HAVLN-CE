@@ -111,6 +111,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Experimental: retarget from Kimodo posed_joints by bone-direction IK.",
     )
+    parser.add_argument(
+        "--no-procedural-running-arms",
+        action="store_true",
+        help="Disable the locomotion-specific target-rig arm swing cleanup layer.",
+    )
+    parser.add_argument("--running-arm-swing-strength", type=float, default=0.88)
     return parser.parse_args()
 
 
@@ -166,6 +172,8 @@ def main() -> None:
             calibrated_leg_ik=not args.no_calibrated_leg_ik,
             body_relative_leg_ik=args.body_relative_leg_ik,
             prefer_joint_position_ik=args.joint_ik,
+            procedural_running_arm_swing=not args.no_procedural_running_arms,
+            running_arm_swing_strength=args.running_arm_swing_strength,
             solidify_shell=not args.no_solidify_shell,
             body_shell_thickness=args.body_shell_thickness,
             hair_shell_thickness=args.hair_shell_thickness,
