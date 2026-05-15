@@ -559,7 +559,7 @@ def _apply_calibrated_leg_ik(
             for index in range(min(len(source_global_rot_mats), len(SMPL22_TO_MIXAMO)))
         }
     current_globals = node_global_matrices(gltf, local)
-    target_basis = _target_body_basis_from_globals(current_globals, skin, joint_by_name) if body_relative else None
+    target_basis = _target_body_basis_from_globals(current_globals, skin, joint_by_name)
     local_rest_rot = {
         skin_index: _local_rest_rotation(gltf, node_index) for skin_index, node_index in enumerate(skin.joints)
     }
@@ -643,7 +643,7 @@ def _apply_calibrated_leg_ik(
             (guide is None or not guide.skip_foot_ik)
             and calibration.toe is not None
             and calibration.rest_toe_local is not None
-            and calibration.rest_pole_foot_local is not None
+            and calibration.rest_foot_up_local is not None
         ):
             source_toe = source[source_map["toe"]]
             source_toe_direction = _source_body_relative_direction(
@@ -656,11 +656,18 @@ def _apply_calibrated_leg_ik(
             )
             if source_toe_direction is not None:
                 knee_global_rot = hip_global_rot * local_rest_rot[calibration.knee] * knee_delta
+                body_up_target = target_basis[:, 1] if target_basis is not None else GLTF_UP
+                up_minus_toe = body_up_target - source_toe_direction * float(
+                    np.dot(body_up_target, source_toe_direction)
+                )
+                foot_up_target = _safe_unit(up_minus_toe)
+                if foot_up_target is None:
+                    foot_up_target = body_up_target
                 desired_foot_rot = _basis_rotation(
                     calibration.rest_toe_local,
-                    calibration.rest_pole_foot_local,
+                    calibration.rest_foot_up_local,
                     source_toe_direction,
-                    pole,
+                    foot_up_target,
                 )
                 foot_delta = local_rest_rot[calibration.ankle].inv() * knee_global_rot.inv() * desired_foot_rot
                 local[calibration.ankle] = foot_delta.as_quat()
