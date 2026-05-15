@@ -34,10 +34,8 @@ def expand_paths(paths: list[Path]) -> list[Path]:
     expanded: list[Path] = []
     for path in paths:
         if path.is_dir():
-            expanded.extend(sorted(path.glob("*.npz")))
-            expanded.extend(sorted(path.glob("*.pt")))
-            expanded.extend(sorted(path.glob("*/*.npz")))
-            expanded.extend(sorted(path.glob("*/*.pt")))
+            expanded.extend(sorted(path.rglob("*.npz")))
+            expanded.extend(sorted(path.rglob("*.pt")))
         else:
             expanded.extend(sorted(path.parent.glob(path.name)) if any(ch in path.name for ch in "*?[]") else [path])
     return [path for path in expanded if path.exists() and is_motion_candidate(path)]

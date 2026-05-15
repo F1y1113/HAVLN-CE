@@ -49,6 +49,25 @@ PYTHONPATH=src python3 scripts/generate_avatar_action.py \
   --frames 120
 ```
 
+## Motion Quality Gate
+
+Before retargeting a Kimodo/GEM batch, rank the generated candidates and only
+render the top source:
+
+```bash
+PYTHONPATH=src python3 scripts/score_kimodo_motions.py outputs/kimodo_batch \
+  --prompt "A person jogs around a small circle with natural arm swing." \
+  --frames 72 \
+  --output-json outputs/kimodo_batch/motion_quality_report.json
+```
+
+The scorer recursively scans nested Kimodo output folders. It rejects non-finite
+motions, over-tight body folds, unsafe limb/head clearances, abrupt leg changes,
+and prompt-specific failures. For running/jogging prompts it also measures
+front-back hand swing, hand spread from the torso, left/right hand alternation,
+arm-leg counterphase, and elbow bend. This catches samples where the feet move
+but the arms are held wide, locked, or synchronized with the wrong leg.
+
 ## Override Avatar Selection
 
 ```bash
@@ -111,9 +130,11 @@ stabilization, aligning the foot-up axis to the floor normal, and neutralizing
 toe-base curl. Use `--no-foot-orientation-lock` when isolating height/position
 locking from ankle twist problems.
 
-For running clips where generated arm motion looks robotic, damp the upper-arm,
-forearm, and hand channels independently with `--arm-rotation-scale`,
-`--forearm-rotation-scale`, and `--hand-rotation-scale`.
+For running clips where generated arm motion still looks robotic after sample
+selection, damp the upper-arm, forearm, and hand channels independently with
+`--arm-rotation-scale`, `--forearm-rotation-scale`, and `--hand-rotation-scale`.
+Treat this as a small cleanup pass; a source with no natural arm swing should be
+rejected by the quality gate and regenerated with a stronger prompt.
 
 ## Habitat Material And Thickness
 

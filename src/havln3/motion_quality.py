@@ -15,6 +15,11 @@ SMPL_LEG_JOINTS = {
     "Right": {"hip": 2, "knee": 5, "ankle": 8, "toe": 11},
 }
 
+SMPL_ARM_JOINTS = {
+    "Left": {"shoulder": 16, "elbow": 18, "hand": 20},
+    "Right": {"shoulder": 17, "elbow": 19, "hand": 21},
+}
+
 
 @dataclass(frozen=True)
 class MotionQualityOptions:
@@ -31,6 +36,15 @@ class MotionQualityOptions:
     min_hand_foot_clearance_ratio: float = 0.08
     min_knee_chest_clearance_ratio: float = 0.10
     max_root_drift_ratio: float = 1.15
+    min_running_arm_forward_range_ratio: float = 0.07
+    max_running_hand_lateral_p95_ratio: float = 0.34
+    min_running_arm_leg_counterphase: float = 0.08
+    min_running_hand_opposition: float = 0.06
+    min_running_elbow_angle_degrees: float = 34.0
+    max_running_elbow_angle_degrees: float = 170.0
+    min_circle_root_path_ratio: float = 0.35
+    min_circle_root_turn_degrees: float = 55.0
+    max_running_root_vertical_range_ratio: float = 0.40
 
 
 @dataclass(frozen=True)
@@ -106,6 +120,16 @@ def _is_backflip_prompt(prompt: str | None) -> bool:
 def _is_stationary_prompt(prompt: str | None) -> bool:
     text = (prompt or "").lower()
     return any(token in text for token in ("standing", "stationary", "in place", "原地"))
+
+
+def _is_running_prompt(prompt: str | None) -> bool:
+    text = (prompt or "").lower()
+    return any(token in text for token in ("run", "running", "jog", "jogging", "跑步", "慢跑", "小跑"))
+
+
+def _is_circle_prompt(prompt: str | None) -> bool:
+    text = (prompt or "").lower()
+    return any(token in text for token in ("circle", "loop", "circular", "绕圈", "小圈", "转圈", "环形"))
 
 
 def _finite_or_default(value: float | None, default: float = 0.0) -> float:
@@ -286,6 +310,76 @@ def _self_contact_metrics(points: np.ndarray, body_height: float) -> dict[str, f
     }
 
 
+def _correlation_or_zero(a: np.ndarray, b: np.ndarray) -> float:
+    if len(a) < 3 or len(b) < 3:
+        return 0.0
+    if float(np.nanstd(a)) < 1e-6 or float(np.nanstd(b)) < 1e-6:
+        return 0.0
+    corr = np.corrcoef(a, b)[0, 1]
+    return _finite_or_default(float(corr))
+
+
+def _arm_swing_metrics(points: np.ndarray, body_height: float) -> dict[str, float]:
+    local_hands: dict[str, list[np.ndarray]] = {"Left": [], "Right": []}
+    local_ankles: dict[str, list[np.ndarray]] = {"Left": [], "Right": []}
+    elbow_angles: list[float] = []
+
+    for frame in points:
+        basis = _orthonormal_body_basis(frame)
+        if basis is None:
+            continue
+        torso_origin = frame[9] if len(frame) > 9 else frame[0]
+        pelvis = frame[0]
+        for side in ("Left", "Right"):
+            arm = SMPL_ARM_JOINTS[side]
+            leg = SMPL_LEG_JOINTS[side]
+            shoulder = frame[arm["shoulder"]]
+            elbow = frame[arm["elbow"]]
+            hand = frame[arm["hand"]]
+            local_hands[side].append(basis.T @ (hand - torso_origin) / body_height)
+            local_ankles[side].append(basis.T @ (frame[leg["ankle"]] - pelvis) / body_height)
+            elbow_angle = _angle_degrees(shoulder - elbow, hand - elbow)
+            if elbow_angle is not None:
+                elbow_angles.append(elbow_angle)
+
+    left_hand = np.asarray(local_hands["Left"], dtype=np.float64)
+    right_hand = np.asarray(local_hands["Right"], dtype=np.float64)
+    left_ankle = np.asarray(local_ankles["Left"], dtype=np.float64)
+    right_ankle = np.asarray(local_ankles["Right"], dtype=np.float64)
+
+    if len(left_hand) == 0 or len(right_hand) == 0 or len(left_ankle) == 0 or len(right_ankle) == 0:
+        return {
+            "arm_forward_range_ratio": 0.0,
+            "hand_lateral_p95_ratio": 0.0,
+            "arm_leg_counterphase": 0.0,
+            "hand_opposition": 0.0,
+            "elbow_angle_min_degrees": 0.0,
+            "elbow_angle_max_degrees": 0.0,
+            "elbow_angle_median_degrees": 0.0,
+        }
+
+    hand_forward_ranges = [
+        float(np.nanmax(hand[:, 2]) - np.nanmin(hand[:, 2]))
+        for hand in (left_hand, right_hand)
+        if len(hand)
+    ]
+    hand_lateral = np.abs(np.concatenate([left_hand[:, 0], right_hand[:, 0]]))
+    hand_diff = left_hand[:, 2] - right_hand[:, 2]
+    leg_diff = left_ankle[:, 2] - right_ankle[:, 2]
+    hand_opposition = -_correlation_or_zero(left_hand[:, 2], right_hand[:, 2])
+    arm_leg_counterphase = -_correlation_or_zero(hand_diff, leg_diff)
+
+    return {
+        "arm_forward_range_ratio": float(np.nanmean(hand_forward_ranges)) if hand_forward_ranges else 0.0,
+        "hand_lateral_p95_ratio": float(np.nanpercentile(hand_lateral, 95)) if len(hand_lateral) else 0.0,
+        "arm_leg_counterphase": arm_leg_counterphase,
+        "hand_opposition": hand_opposition,
+        "elbow_angle_min_degrees": float(np.nanmin(elbow_angles)) if elbow_angles else 0.0,
+        "elbow_angle_max_degrees": float(np.nanmax(elbow_angles)) if elbow_angles else 0.0,
+        "elbow_angle_median_degrees": float(np.nanmedian(elbow_angles)) if elbow_angles else 0.0,
+    }
+
+
 def _shape_jerk(points: np.ndarray, body_height: float) -> float:
     local = points - points[:, :1]
     acceleration = np.diff(local, n=2, axis=0)
@@ -303,6 +397,51 @@ def _root_drift_ratio(clip: MotionClip, frames: int, body_height: float) -> floa
     horizontal = root[:, [0, 2]]
     drift = float(np.linalg.norm(horizontal[-1] - horizontal[0]))
     return drift / body_height
+
+
+def _root_locomotion_metrics(clip: MotionClip, frames: int, body_height: float) -> dict[str, float | bool]:
+    root = resample_motion(clip, frames).root_positions
+    if root is None or len(root) < 2:
+        return {
+            "has_root_positions": False,
+            "root_path_length_ratio": 0.0,
+            "root_net_displacement_ratio": 0.0,
+            "root_loop_ratio": 0.0,
+            "root_horizontal_span_ratio": 0.0,
+            "root_abs_turn_degrees": 0.0,
+            "root_signed_turn_degrees": 0.0,
+            "root_vertical_range_ratio": 0.0,
+        }
+
+    horizontal = np.asarray(root[:, :2], dtype=np.float64)
+    if horizontal.shape[1] == 1:
+        horizontal = np.column_stack([horizontal[:, 0], np.zeros(len(horizontal), dtype=np.float64)])
+    diffs = np.diff(horizontal, axis=0)
+    segment_lengths = np.linalg.norm(diffs, axis=1)
+    path_length = float(np.nansum(segment_lengths))
+    net_displacement = float(np.linalg.norm(horizontal[-1] - horizontal[0]))
+    span = float(np.linalg.norm(np.nanmax(horizontal, axis=0) - np.nanmin(horizontal, axis=0)))
+    valid = segment_lengths > 1e-8
+    abs_turn = 0.0
+    signed_turn = 0.0
+    if int(np.count_nonzero(valid)) > 1:
+        dirs = diffs[valid] / (segment_lengths[valid, None] + 1e-12)
+        cross = dirs[:-1, 0] * dirs[1:, 1] - dirs[:-1, 1] * dirs[1:, 0]
+        dot = np.sum(dirs[:-1] * dirs[1:], axis=1)
+        angles = np.arctan2(cross, np.clip(dot, -1.0, 1.0))
+        abs_turn = float(np.degrees(np.nansum(np.abs(angles))))
+        signed_turn = float(np.degrees(np.nansum(angles)))
+    vertical = np.asarray(root[:, 2], dtype=np.float64) if root.shape[1] >= 3 else np.zeros(len(root), dtype=np.float64)
+    return {
+        "has_root_positions": True,
+        "root_path_length_ratio": path_length / body_height,
+        "root_net_displacement_ratio": net_displacement / body_height,
+        "root_loop_ratio": net_displacement / max(path_length, 1e-8),
+        "root_horizontal_span_ratio": span / body_height,
+        "root_abs_turn_degrees": abs_turn,
+        "root_signed_turn_degrees": signed_turn,
+        "root_vertical_range_ratio": float(np.nanmax(vertical) - np.nanmin(vertical)) / body_height,
+    }
 
 
 def score_motion_clip(
@@ -333,8 +472,10 @@ def score_motion_clip(
     metrics.update(_backflip_metrics(points))
     metrics.update(_leg_metrics(points, body_height))
     metrics.update(_self_contact_metrics(points, body_height))
+    metrics.update(_arm_swing_metrics(points, body_height))
     metrics["shape_jerk"] = _shape_jerk(points, body_height)
     metrics["root_drift_ratio"] = _root_drift_ratio(clip, options.frames, body_height)
+    metrics.update(_root_locomotion_metrics(clip, options.frames, body_height))
 
     score = 100.0
     if finite_ratio < 0.999:
@@ -415,6 +556,49 @@ def score_motion_clip(
         if drift > options.max_root_drift_ratio:
             score -= (drift - options.max_root_drift_ratio) * 18.0
             reasons.append("root drifts too far for a stationary prompt")
+
+    if _is_running_prompt(prompt or clip.prompt):
+        arm_range = float(metrics["arm_forward_range_ratio"])
+        hand_lateral = float(metrics["hand_lateral_p95_ratio"])
+        counterphase = float(metrics["arm_leg_counterphase"])
+        hand_opposition = float(metrics["hand_opposition"])
+        elbow_min = float(metrics["elbow_angle_min_degrees"])
+        elbow_max = float(metrics["elbow_angle_max_degrees"])
+        if arm_range < options.min_running_arm_forward_range_ratio:
+            score -= (options.min_running_arm_forward_range_ratio - arm_range) * 160.0
+            reasons.append("running arms do not swing forward/back enough")
+        if hand_lateral > options.max_running_hand_lateral_p95_ratio:
+            score -= (hand_lateral - options.max_running_hand_lateral_p95_ratio) * 45.0
+            reasons.append("running hands are held too wide from the torso")
+        if counterphase < options.min_running_arm_leg_counterphase:
+            score -= (options.min_running_arm_leg_counterphase - counterphase) * 18.0
+            reasons.append("running arm swing is not counter-phased with the legs")
+        if hand_opposition < options.min_running_hand_opposition:
+            score -= (options.min_running_hand_opposition - hand_opposition) * 16.0
+            reasons.append("left and right running arms do not alternate cleanly")
+        if elbow_min < options.min_running_elbow_angle_degrees:
+            score -= (options.min_running_elbow_angle_degrees - elbow_min) * 0.35
+            reasons.append("running elbows fold too tightly")
+        if elbow_max > options.max_running_elbow_angle_degrees:
+            score -= (elbow_max - options.max_running_elbow_angle_degrees) * 0.28
+            reasons.append("running elbows straighten too much")
+        root_vertical = float(metrics["root_vertical_range_ratio"])
+        if root_vertical > options.max_running_root_vertical_range_ratio:
+            score -= (root_vertical - options.max_running_root_vertical_range_ratio) * 35.0
+            reasons.append("running root moves vertically too much")
+
+    if _is_circle_prompt(prompt or clip.prompt):
+        root_path = float(metrics["root_path_length_ratio"])
+        root_turn = float(metrics["root_abs_turn_degrees"])
+        if not bool(metrics["has_root_positions"]):
+            score -= 6.0
+            reasons.append("circle prompt has no root path to evaluate")
+        if root_path < options.min_circle_root_path_ratio:
+            score -= (options.min_circle_root_path_ratio - root_path) * 30.0
+            reasons.append("circle running root path is too short")
+        if root_turn < options.min_circle_root_turn_degrees:
+            score -= (options.min_circle_root_turn_degrees - root_turn) * 0.08
+            reasons.append("circle running root path does not turn enough")
 
     if float(metrics["leg_reach_ratio_min"]) < options.min_leg_reach_ratio:
         reasons.append("leg chain collapses too tightly")

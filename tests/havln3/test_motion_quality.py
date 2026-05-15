@@ -65,6 +65,69 @@ def _synthetic_clip(angles: np.ndarray, *, fold_midair: bool = False) -> MotionC
     )
 
 
+def _running_clip(*, wide_locked_arms: bool = False) -> MotionClip:
+    frames = 72
+    posed = np.zeros((frames, 22, 3), dtype=np.float64)
+    root_positions = np.zeros((frames, 3), dtype=np.float64)
+    side = np.array([1.0, 0.0, 0.0])
+    up = np.array([0.0, 0.0, 1.0])
+    forward = np.array([0.0, -1.0, 0.0])
+    for frame_index in range(frames):
+        phase = 2.0 * np.pi * frame_index / frames
+        root_positions[frame_index] = np.array([0.45 * np.cos(phase), 0.45 * np.sin(phase), 0.0])
+        pelvis = np.array([0.0, 0.0, 1.0])
+        frame = np.zeros((22, 3), dtype=np.float64)
+        frame[0] = pelvis
+        frame[3] = pelvis + up * 0.25
+        frame[6] = pelvis + up * 0.42
+        frame[9] = pelvis + up * 0.58
+        frame[12] = pelvis + up * 0.68
+        frame[15] = pelvis + up * 0.82
+        frame[13] = frame[9] - side * 0.18
+        frame[14] = frame[9] + side * 0.18
+        frame[16] = frame[13] - side * 0.08 - up * 0.07
+        frame[17] = frame[14] + side * 0.08 - up * 0.07
+
+        for sign, hip_index, knee_index, ankle_index, toe_index in (
+            (-1.0, 1, 4, 7, 10),
+            (1.0, 2, 5, 8, 11),
+        ):
+            leg_phase = np.sin(phase) if sign < 0 else -np.sin(phase)
+            hip = pelvis + side * sign * 0.11 - up * 0.05
+            knee = hip - up * 0.36 + forward * (0.08 * leg_phase)
+            ankle = hip - up * 0.72 + forward * (0.18 * leg_phase)
+            frame[hip_index] = hip
+            frame[knee_index] = knee
+            frame[ankle_index] = ankle
+            frame[toe_index] = ankle + forward * 0.12
+
+        for sign, shoulder_index, elbow_index, hand_index in (
+            (-1.0, 16, 18, 20),
+            (1.0, 17, 19, 21),
+        ):
+            shoulder = frame[shoulder_index]
+            if wide_locked_arms:
+                elbow = shoulder + side * sign * 0.28 - up * 0.02
+                hand = shoulder + side * sign * 0.58 - up * 0.03
+            else:
+                arm_phase = -np.sin(phase) if sign < 0 else np.sin(phase)
+                elbow = shoulder + side * sign * 0.02 - up * 0.20 + forward * (0.05 * arm_phase)
+                hand = elbow - side * sign * 0.02 - up * 0.16 + forward * (0.14 * arm_phase)
+            frame[elbow_index] = elbow
+            frame[hand_index] = hand
+
+        posed[frame_index] = frame
+
+    mats = np.tile(np.eye(3, dtype=np.float64), (frames, 22, 1, 1))
+    return MotionClip(
+        local_rot_mats=mats,
+        root_positions=root_positions,
+        posed_joints=posed,
+        foot_contacts=None,
+        source_path=Path("synthetic_running.npz"),
+    )
+
+
 def test_motion_quality_prefers_complete_backflip_over_partial_rotation() -> None:
     full = _synthetic_clip(np.linspace(0.0, -2.0 * np.pi, 48))
     partial = _synthetic_clip(np.concatenate([np.linspace(0.0, -1.0 * np.pi, 24), np.linspace(-1.0 * np.pi, 0.0, 24)]))
@@ -103,3 +166,18 @@ def test_motion_quality_penalizes_self_contact_tuck() -> None:
     assert folded_report.metrics["limb_core_clearance_min_ratio"] < clean_report.metrics["limb_core_clearance_min_ratio"]
     assert "hands and feet get too close during tuck" in folded_report.reasons
     assert "limbs get too close to torso/head" in folded_report.reasons
+
+
+def test_motion_quality_penalizes_running_without_natural_arm_swing() -> None:
+    natural = _running_clip()
+    wide_locked = _running_clip(wide_locked_arms=True)
+
+    options = MotionQualityOptions(frames=72)
+    natural_report = score_motion_clip(natural, prompt="A person jogs around a small circle.", options=options)
+    wide_report = score_motion_clip(wide_locked, prompt="A person jogs around a small circle.", options=options)
+
+    assert natural_report.score > wide_report.score
+    assert natural_report.metrics["arm_forward_range_ratio"] > wide_report.metrics["arm_forward_range_ratio"]
+    assert natural_report.metrics["arm_leg_counterphase"] > 0.8
+    assert "running arms do not swing forward/back enough" in wide_report.reasons
+    assert "running hands are held too wide from the torso" in wide_report.reasons
