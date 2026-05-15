@@ -57,6 +57,10 @@ class AvatarActionRequest:
     foot_contact_velocity: float = 0.02
     foot_contact_use_source: bool = True
     foot_lock_blend_frames: int = 4
+    grounded_foot_ik: bool = True
+    foot_support_min_frames: int = 8
+    foot_support_max_frames: int = 16
+    foot_support_max_air_frames: int = 8
     airborne_leg_stabilization: bool = False
     airborne_leg_stabilization_strength: float = 0.85
     airborne_tuck_reach_ratio: float = 0.52
@@ -117,6 +121,10 @@ class AvatarActionPipeline:
             foot_contact_velocity=request.foot_contact_velocity,
             foot_contact_use_source=request.foot_contact_use_source,
             foot_lock_blend_frames=request.foot_lock_blend_frames,
+            grounded_foot_ik=request.grounded_foot_ik,
+            foot_support_min_frames=request.foot_support_min_frames,
+            foot_support_max_frames=request.foot_support_max_frames,
+            foot_support_max_air_frames=request.foot_support_max_air_frames,
             airborne_leg_stabilization=request.airborne_leg_stabilization,
             airborne_leg_stabilization_strength=request.airborne_leg_stabilization_strength,
             airborne_tuck_reach_ratio=request.airborne_tuck_reach_ratio,

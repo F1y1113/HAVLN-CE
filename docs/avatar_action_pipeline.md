@@ -91,21 +91,25 @@ For stationary acrobatics such as standing backflips, add:
 ```
 
 `--stabilize-root-yaw` removes unwanted horizontal spin while preserving the
-flip's pitch/roll. `--foot-contact-lock` now detects contact per foot from two
-signals: the foot must be close to the floor and its horizontal velocity must be
-small. This prevents Kimodo's noisy `foot_contacts` arrays from locking an
-entire action when the generated contact labels are nearly always true. Source
-contact labels are used only when their left/right ratios look non-degenerate;
-pass `--ignore-source-foot-contacts` to force pure geometric detection.
+flip's pitch/roll. `--foot-contact-lock` now prefers grounded foot IK when
+calibrated leg IK is available. It starts with strict geometric contacts
+(low foot height plus low horizontal velocity), rejects degenerate Kimodo
+`foot_contacts` labels, expands low-foot events into alternating gait support
+windows, then pins each support foot with the target rig's two-bone leg IK
+instead of translating the whole body.
 
-During detected contact, each foot is locked in short per-foot segments with a
-small edge blend. Tune `--foot-contact-height`, `--foot-contact-velocity`, and
-`--foot-lock-blend-frames` when a running source touches down too early or too
-late. Contact-foot orientation stabilization is enabled by default, aligning
-the toe direction to the target rig's body-facing direction, compensating for
-root yaw stabilization, aligning the foot-up axis to the floor normal, and
-neutralizing toe-base curl. Use `--no-foot-orientation-lock` when isolating
-height/position locking from ankle twist problems.
+Tune `--foot-contact-height`, `--foot-contact-velocity`,
+`--foot-support-min-frames`, `--foot-support-max-frames`,
+`--foot-support-max-air-frames`, and `--foot-lock-blend-frames` when a running
+source touches down too early, stays planted too long, or spends too many frames
+with both feet airborne. `--no-grounded-foot-ik` falls back to the older
+whole-frame contact correction for debugging only.
+
+Contact-foot orientation stabilization is enabled by default, aligning the toe
+direction to the target rig's body-facing direction, compensating for root yaw
+stabilization, aligning the foot-up axis to the floor normal, and neutralizing
+toe-base curl. Use `--no-foot-orientation-lock` when isolating height/position
+locking from ankle twist problems.
 
 For running clips where generated arm motion looks robotic, damp the upper-arm,
 forearm, and hand channels independently with `--arm-rotation-scale`,

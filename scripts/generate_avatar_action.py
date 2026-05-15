@@ -83,6 +83,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--foot-lock-blend-frames", type=int, default=4)
     parser.add_argument(
+        "--no-grounded-foot-ik",
+        action="store_true",
+        help="Use legacy whole-frame contact correction instead of per-foot two-bone IK targets.",
+    )
+    parser.add_argument("--foot-support-min-frames", type=int, default=8)
+    parser.add_argument("--foot-support-max-frames", type=int, default=16)
+    parser.add_argument("--foot-support-max-air-frames", type=int, default=8)
+    parser.add_argument(
         "--airborne-leg-stabilization",
         action="store_true",
         help="Experimental: stabilize airborne acrobatic leg motion in pelvis-local space before leg IK.",
@@ -148,6 +156,10 @@ def main() -> None:
             foot_contact_velocity=args.foot_contact_velocity,
             foot_contact_use_source=not args.ignore_source_foot_contacts,
             foot_lock_blend_frames=args.foot_lock_blend_frames,
+            grounded_foot_ik=not args.no_grounded_foot_ik,
+            foot_support_min_frames=args.foot_support_min_frames,
+            foot_support_max_frames=args.foot_support_max_frames,
+            foot_support_max_air_frames=args.foot_support_max_air_frames,
             airborne_leg_stabilization=args.airborne_leg_stabilization,
             airborne_leg_stabilization_strength=args.airborne_leg_stabilization_strength,
             airborne_tuck_reach_ratio=args.airborne_tuck_reach_ratio,

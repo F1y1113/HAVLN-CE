@@ -7,6 +7,9 @@ from havln3.retarget import (
     FrameGeometry,
     _apply_foot_contact_lock,
     _apply_root_yaw_stabilization,
+    _expand_support_contact_mask,
+    _foot_contact_analysis,
+    _max_airborne_gap,
     _source_body_relative_direction,
 )
 
@@ -96,6 +99,51 @@ def test_foot_contact_lock_anchors_landing_foot_position() -> None:
     assert np.allclose(left_toe[[0, 2]], left_anchor[[0, 2]])
     assert left_toe[1] >= 0.0
     assert abs(frames[-1].vertices_by_primitive[0][:, 1].min() - 0.0) < 1e-6
+
+
+def test_support_contact_mask_expands_low_foot_gait_phases() -> None:
+    frames = []
+    for frame_index in range(36):
+        left_phase = np.sin((frame_index - 5) / 7.0 * np.pi)
+        right_phase = np.sin((frame_index - 12) / 7.0 * np.pi)
+        left_low = 0.03 + 0.08 * ((left_phase + 1.0) * 0.5)
+        right_low = 0.03 + 0.08 * ((right_phase + 1.0) * 0.5)
+        x = frame_index * 0.04
+        joints = np.array(
+            [
+                [x, 1.0, 0.0],
+                [x - 0.2, 0.8, 0.0],
+                [x + 0.2, 0.8, 0.0],
+                [x - 0.2, left_low, 0.0],
+                [x - 0.2, left_low, 0.2],
+                [x + 0.2, right_low, 0.0],
+                [x + 0.2, right_low, 0.2],
+            ],
+            dtype=np.float64,
+        )
+        frames.append(_frame(joints))
+
+    analysis = _foot_contact_analysis(
+        frames,
+        JOINTS,
+        ground_y=0.0,
+        contact_height=0.04,
+        contact_velocity=0.001,
+        use_source_contacts=False,
+    )
+    assert analysis is not None
+    expanded = _expand_support_contact_mask(
+        analysis,
+        fps=60,
+        ground_y=0.0,
+        contact_height=0.04,
+        min_segment_frames=6,
+        max_air_frames=4,
+    )
+
+    assert int(expanded.sum()) > int(analysis.contact_mask.sum())
+    assert _max_airborne_gap(expanded) <= 4
+    assert int((expanded.sum(axis=1) > 1).sum()) == 0
 
 
 def test_body_relative_leg_direction_follows_target_parent_frame() -> None:
