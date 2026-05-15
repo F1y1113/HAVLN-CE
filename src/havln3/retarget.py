@@ -846,6 +846,55 @@ def _source_foot_contact_mask(foot_contacts: np.ndarray | None, frame_count: int
     return np.column_stack([left, right])
 
 
+def _fill_short_false_gaps(mask: np.ndarray, max_gap_frames: int) -> np.ndarray:
+    if max_gap_frames <= 0:
+        return mask
+    filled = mask.copy()
+    for start, end in _contiguous_segments(~filled):
+        if start == 0 or end == len(filled) - 1:
+            continue
+        if end - start + 1 <= max_gap_frames:
+            filled[start : end + 1] = True
+    return filled
+
+
+def _drop_short_true_segments(mask: np.ndarray, min_frames: int) -> np.ndarray:
+    if min_frames <= 1:
+        return mask
+    cleaned = mask.copy()
+    for start, end in _contiguous_segments(cleaned):
+        if end - start + 1 < min_frames:
+            cleaned[start : end + 1] = False
+    return cleaned
+
+
+def _stabilize_contact_mask(
+    enter_mask: np.ndarray,
+    stay_mask: np.ndarray,
+    *,
+    min_frames: int = 2,
+    max_gap_frames: int = 2,
+) -> np.ndarray:
+    stabilized = np.zeros_like(enter_mask, dtype=bool)
+    for side_index in range(enter_mask.shape[1]):
+        active = False
+        for frame_index in range(len(enter_mask)):
+            if active:
+                active = bool(stay_mask[frame_index, side_index])
+            else:
+                active = bool(enter_mask[frame_index, side_index])
+            stabilized[frame_index, side_index] = active
+        stabilized[:, side_index] = _fill_short_false_gaps(
+            stabilized[:, side_index],
+            max_gap_frames,
+        )
+        stabilized[:, side_index] = _drop_short_true_segments(
+            stabilized[:, side_index],
+            min_frames,
+        )
+    return stabilized
+
+
 def _select_lock_segments(support_mask: np.ndarray) -> list[tuple[int, int]]:
     frame_count = len(support_mask)
     segments = _contiguous_segments(support_mask)
@@ -915,11 +964,19 @@ def _foot_contact_analysis(
         speeds[:, side_index] = side_speeds
 
     height_mask = np.isfinite(lows) & (lows <= (ground_y + contact_height))
+    stay_height_mask = np.isfinite(lows) & (
+        lows <= ground_y + max(contact_height * 1.7, contact_height + 0.025)
+    )
     if contact_velocity is not None and contact_velocity > 0.0:
         speed_mask = np.isfinite(speeds) & (speeds <= contact_velocity)
+        stay_speed_mask = np.isfinite(speeds) & (
+            speeds <= max(contact_velocity * 2.25, contact_velocity + 0.015)
+        )
     else:
         speed_mask = np.isfinite(lows)
-    contact_mask = height_mask & speed_mask
+        stay_speed_mask = np.isfinite(lows)
+    enter_mask = height_mask & speed_mask
+    stay_mask = stay_height_mask & stay_speed_mask
 
     source_contacts_used = False
     source_contact_ratio = [0.0, 0.0]
@@ -933,15 +990,30 @@ def _foot_contact_analysis(
             source_height_mask = np.isfinite(lows) & (lows <= ground_y + contact_height * 1.25)
             if contact_velocity is not None and contact_velocity > 0.0:
                 source_speed_mask = np.isfinite(speeds) & (speeds <= contact_velocity * 1.75)
+                source_stay_speed_mask = np.isfinite(speeds) & (speeds <= contact_velocity * 2.5)
             else:
                 source_speed_mask = np.isfinite(lows)
-            contact_mask = contact_mask | (
+                source_stay_speed_mask = np.isfinite(lows)
+            source_enter = (
                 source_mask
                 & usable.reshape(1, 2)
                 & source_height_mask
                 & source_speed_mask
             )
-    contact_mask = np.nan_to_num(contact_mask, nan=False).astype(bool)
+            source_stay = (
+                source_mask
+                & usable.reshape(1, 2)
+                & (np.isfinite(lows) & (lows <= ground_y + contact_height * 1.7))
+                & source_stay_speed_mask
+            )
+            enter_mask = enter_mask | source_enter
+            stay_mask = stay_mask | source_stay
+    contact_mask = _stabilize_contact_mask(
+        np.nan_to_num(enter_mask, nan=False).astype(bool),
+        np.nan_to_num(stay_mask, nan=False).astype(bool),
+        min_frames=2,
+        max_gap_frames=2,
+    )
     support_mask = contact_mask.any(axis=1)
     return FootContactAnalysis(
         centers=centers,
@@ -1651,16 +1723,26 @@ def _apply_grounded_foot_ik(
                 np.nanmedian(centers[valid_center, 1] - lows[valid_center])
             )
 
+    support_segment_count = 0
+    internal_split_count = 0
     for side_index, side in enumerate(sides):
         calibration = calibration_by_side.get(side)
         if calibration is None:
             continue
-        side_segments: list[tuple[int, int]] = []
-        for start, end in _contiguous_segments(support_mask[:, side_index]):
-            side_segments.extend(
-                _split_long_segment(start, end, max(2, options.foot_support_max_frames))
+        side_segments: list[tuple[int, int, int, int]] = []
+        for support_start, support_end in _contiguous_segments(support_mask[:, side_index]):
+            support_segment_count += 1
+            split_segments = _split_long_segment(
+                support_start,
+                support_end,
+                max(2, options.foot_support_max_frames),
             )
-        for start, end in side_segments:
+            internal_split_count += max(0, len(split_segments) - 1)
+            side_segments.extend(
+                (start, end, support_start, support_end)
+                for start, end in split_segments
+            )
+        for start, end, support_start, support_end in side_segments:
             if end - start + 1 < 2:
                 continue
             centers = analysis.centers[start : end + 1, side_index]
@@ -1683,10 +1765,29 @@ def _apply_grounded_foot_ik(
             score[~valid] = np.inf
             anchor_frame = int(start + np.argmin(score))
             anchor_center = np.array([anchor_xy[0], target_center_y, anchor_xy[1]], dtype=np.float64)
+            anchor_local = local_quats_by_frame[anchor_frame]
+            anchor_globals = node_global_matrices(gltf, anchor_local)
+            anchor_ankle = anchor_globals[skin.joints[calibration.ankle]][:3, 3]
+            if calibration.toe is not None:
+                anchor_toe = anchor_globals[skin.joints[calibration.toe]][:3, 3]
+                anchor_current_center = (anchor_ankle + anchor_toe) * 0.5
+            else:
+                anchor_current_center = anchor_ankle
+            anchor_center_to_ankle = anchor_current_center - anchor_ankle
+            anchor_forward = _body_forward_from_globals(
+                anchor_globals,
+                gltf,
+                skin,
+                joint_by_name,
+            )
+            if anchor_forward is None:
+                anchor_forward = calibration.rest_contact_toe_global
             applied_segments.append(
                 {
                     "start": int(start),
                     "end": int(end),
+                    "support_start": int(support_start),
+                    "support_end": int(support_end),
                     "anchor_frame": anchor_frame,
                     "side": side,
                 }
@@ -1695,21 +1796,14 @@ def _apply_grounded_foot_ik(
             for frame_index in range(start, end + 1):
                 weight = _edge_blend_weight(
                     frame_index,
-                    start,
-                    end,
+                    support_start,
+                    support_end,
                     len(local_quats_by_frame),
                     options.foot_lock_blend_frames,
                 )
                 if weight <= 0.0:
                     continue
                 local = local_quats_by_frame[frame_index]
-                globals_ = node_global_matrices(gltf, local)
-                ankle = globals_[skin.joints[calibration.ankle]][:3, 3]
-                if calibration.toe is not None:
-                    toe = globals_[skin.joints[calibration.toe]][:3, 3]
-                    current_center = (ankle + toe) * 0.5
-                else:
-                    current_center = ankle
                 root_offset = _root_offset(
                     clip,
                     frame_index,
@@ -1721,10 +1815,7 @@ def _apply_grounded_foot_ik(
                     normalizer=normalizer,
                     root_offset=root_offset,
                 )
-                target_ankle = target_center - (current_center - ankle)
-                desired_forward = _body_forward_from_globals(globals_, gltf, skin, joint_by_name)
-                if desired_forward is None:
-                    desired_forward = calibration.rest_contact_toe_global
+                target_ankle = target_center - anchor_center_to_ankle
                 if _apply_leg_ik_target(
                     local=local,
                     gltf=gltf,
@@ -1732,7 +1823,7 @@ def _apply_grounded_foot_ik(
                     calibration=calibration,
                     target_ankle=target_ankle,
                     weight=weight,
-                    desired_toe_direction=desired_forward,
+                    desired_toe_direction=anchor_forward,
                     local_rest_rot=local_rest_rot,
                 ):
                     ik_frames.add(frame_index)
@@ -1751,6 +1842,10 @@ def _apply_grounded_foot_ik(
         },
         "max_airborne_gap_before": _max_airborne_gap(analysis.contact_mask),
         "max_airborne_gap_after": _max_airborne_gap(support_mask),
+        "support_segment_count": support_segment_count,
+        "internal_split_count": internal_split_count,
+        "contact_switches_before": int(np.abs(np.diff(analysis.contact_mask.astype(np.int8), axis=0)).sum()),
+        "contact_switches_after": int(np.abs(np.diff(support_mask.astype(np.int8), axis=0)).sum()),
         "source_contacts_used": analysis.source_contacts_used,
         "source_contact_ratio": analysis.source_contact_ratio,
         "strategy": (
@@ -1993,7 +2088,14 @@ def retarget_motion_to_avatar(
         if air_report.get("guided_frames", 0) > 0:
             local_quats_by_frame = build_local_quats_by_frame(leg_guides)
 
-    if options.foot_contact_lock and options.foot_orientation_lock:
+    grounded_foot_ik_expected = options.grounded_foot_ik and leg_ik_enabled
+    if options.foot_contact_lock and options.foot_orientation_lock and grounded_foot_ik_expected:
+        pre_postprocess["foot_orientation_lock"] = {
+            "enabled": True,
+            "locked_frames": 0,
+            "reason": "handled inside grounded foot IK support segments",
+        }
+    elif options.foot_contact_lock and options.foot_orientation_lock:
         rough_frames = _build_frame_geometries(
             gltf=gltf,
             skin=skin,

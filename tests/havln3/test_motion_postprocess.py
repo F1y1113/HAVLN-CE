@@ -146,6 +146,39 @@ def test_support_contact_mask_expands_low_foot_gait_phases() -> None:
     assert int((expanded.sum(axis=1) > 1).sum()) == 0
 
 
+def test_foot_contact_analysis_hysteresis_fills_single_frame_contact_blip() -> None:
+    frames = []
+    left_lows = [0.02, 0.02, 0.05, 0.02, 0.02, 0.11, 0.11]
+    for frame_index, left_low in enumerate(left_lows):
+        x = frame_index * 0.01
+        joints = np.array(
+            [
+                [x, 1.0, 0.0],
+                [x - 0.2, 0.8, 0.0],
+                [x + 0.2, 0.8, 0.0],
+                [x - 0.2, left_low, 0.0],
+                [x - 0.2, left_low, 0.2],
+                [x + 0.2, 0.16, 0.0],
+                [x + 0.2, 0.16, 0.2],
+            ],
+            dtype=np.float64,
+        )
+        frames.append(_frame(joints))
+
+    analysis = _foot_contact_analysis(
+        frames,
+        JOINTS,
+        ground_y=0.0,
+        contact_height=0.03,
+        contact_velocity=None,
+        use_source_contacts=False,
+    )
+
+    assert analysis is not None
+    assert analysis.contact_mask[:5, 0].all()
+    assert not analysis.contact_mask[5:, 0].any()
+
+
 def test_body_relative_leg_direction_follows_target_parent_frame() -> None:
     source_parent = Rotation.from_euler("y", 90, degrees=True)
     target_parent = Rotation.from_euler("y", -45, degrees=True)
